@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    name: Build & Test (${{ matrix.os }}, ASan=${{ matrix.sanitizers }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        sanitizers: [OFF, ON]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies (Ubuntu)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake build-essential clang
+
+    - name: Configure CMake
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DENABLE_ASAN=${{ matrix.sanitizers }} \
+          -DENABLE_UBSAN=${{ matrix.sanitizers }}
+
+    - name: Build
+      run: |
+        cmake --build build --parallel
+
+    - name: Run Tests
+      run: |
+        ./build/l3_tests
+
+    - name: Run Benchmarks (smoke run)
+      run: |
+        ./build/l3_benchmarks --benchmark_min_time=0.01s
+
+    - name: Verify Fixture Integrity
+      run: |
+        python3 scripts/verify_fixture.py data/fixture_3symbols.bin.gz

@@ -1,0 +1,19 @@
+# Build directories
+build*/
+cmake-build-*/
+.cache/
+
+# OS specific
+.DS_Store
+*.swp
+*.swo
+
+# Large data files
+data/raw/
+data/*.gz
+!data/fixture_3symbols.bin.gz
+
+# Python
+__pycache__/
+*.pyc
+.venv/
