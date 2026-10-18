@@ -45,9 +45,42 @@ To ensure verification integrity, [`scripts/count_raw_types.py`](../scripts/coun
 
 ---
 
-## 3. Full-Day Fixture Pipeline
+## 3. Full-Day Fixture (`data/fixture_3symbols_full.bin.gz`)
 
-The full day feed (`12302019.NASDAQ_ITCH50.gz`, 3.52 GB compressed, ~250M messages) is processed using:
-1. `python3 scripts/download_parallel.py --workers 40`: Downloads the multi-gigabyte feed using parallel HTTP Range requests to bypass single-connection server throttling.
-2. `python3 scripts/cut_fixture.py --source data/raw/12302019.NASDAQ_ITCH50.gz --output data/fixture_3symbols_full.bin.gz`: Filters all 250M messages to extract full-day order books for AAPL, SPY, NVDA.
-3. Full-day artifacts are excluded from Git via `.gitignore` (`data/raw/` and `data/*full*`).
+- **Source Date:** December 30, 2019 (`12302019.NASDAQ_ITCH50.gz`, 3.52 GB compressed)
+- **Scanned Messages:** 268,744,780 messages
+- **File Size:** 41,272,679 bytes (~41.2 MB compressed, excluded from git via `.gitignore`)
+- **SHA-256 Checksum:** `12a66b51ecdddcfa85a005d022d05afd354cf871cb52228c6f6303cd4158a1f0`
+- **Total Kept Messages:** 4,115,178
+- **Time Span:**
+  - **First Message:** Type `S` at `03:04:32.058` (`11,072,057,543,747` ns since midnight)
+  - **Last Message:** Type `S` at `20:05:00.000` (`72,300,000,040,070` ns since midnight)
+  - **Total Span:** 17.01 hours (full trading day: pre-market, 09:30 open, regular hours, 16:00 close, and post-market)
+
+### Symbol Breakdown
+- **SPY**  (Locate 7451): 2,138,932 messages
+- **AAPL** (Locate 13):   1,519,865 messages
+- **NVDA** (Locate 5708):   456,375 messages
+- **System Events** (Locate 0): 6 messages
+
+### Message Type Breakdown
+| Type | Description | Count |
+| :--- | :--- | :--- |
+| `A` | Add Order (no MPID) | 1,887,549 |
+| `D` | Order Delete | 1,803,187 |
+| `U` | Order Replace | 256,528 |
+| `E` | Order Executed | 120,437 |
+| `X` | Order Cancel | 21,391 |
+| `P` | Non-Cross Trade | 17,481 |
+| `F` | Add Order with MPID | 5,170 |
+| `C` | Order Executed with Price | 1,923 |
+| `I` | NOII Imbalance Message | 1,352 |
+| `L` | Market Participant Position | 139 |
+| `S` | System Event | 6 |
+| `Q` | Cross Trade | 6 |
+| `R` | Stock Directory | 3 |
+| `H` | Stock Trading Action | 3 |
+| `Y` | Reg SHO Short Sale Test | 3 |
+| **Total** | | **4,115,178** |
+
+Independently verified against raw stream byte framing using `scripts/count_raw_types.py`.
