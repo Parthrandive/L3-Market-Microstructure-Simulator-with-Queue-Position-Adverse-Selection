@@ -64,23 +64,31 @@ To ensure verification integrity, [`scripts/count_raw_types.py`](../scripts/coun
 - **System Events** (Locate 0): 6 messages
 
 ### Message Type Breakdown
-| Type | Description | Count |
-| :--- | :--- | :--- |
-| `A` | Add Order (no MPID) | 1,887,549 |
-| `D` | Order Delete | 1,803,187 |
-| `U` | Order Replace | 256,528 |
-| `E` | Order Executed | 120,437 |
-| `X` | Order Cancel | 21,391 |
-| `P` | Non-Cross Trade | 17,481 |
-| `F` | Add Order with MPID | 5,170 |
-| `C` | Order Executed with Price | 1,923 |
-| `I` | NOII Imbalance Message | 1,352 |
-| `L` | Market Participant Position | 139 |
-| `S` | System Event | 6 |
-| `Q` | Cross Trade | 6 |
-| `R` | Stock Directory | 3 |
-| `H` | Stock Trading Action | 3 |
-| `Y` | Reg SHO Short Sale Test | 3 |
-| **Total** | | **4,115,178** |
+| Type | Category | Description | Count |
+| :--- | :--- | :--- | :--- |
+| `A` | Displayed Order | Add Order (no MPID) | 1,887,549 |
+| `F` | Displayed Order | Add Order with MPID | 5,170 |
+| `D` | Order Lifecycle | Order Delete | 1,803,187 |
+| `U` | Order Lifecycle | Order Replace | 256,528 |
+| `X` | Order Lifecycle | Order Cancel (partial) | 21,391 |
+| `E` | **Displayed Execution** | Order Executed against resting order | **120,437** |
+| `C` | **Displayed Execution** | Order Executed with Price against resting order | **1,923** |
+| `P` | Non-Displayed Trade | Non-Cross Trade (hidden / off-book) | 17,481 |
+| `Q` | Auction Cross | Cross Trade | 6 |
+| `I` | Auction Imbalance | NOII Imbalance Message | 1,352 |
+| `L` | Participant Status | Market Participant Position | 139 |
+| `S` | System Event | System Event Message | 6 |
+| `R` | Reference Data | Stock Directory | 3 |
+| `H` | Reference Data | Stock Trading Action | 3 |
+| `Y` | Reference Data | Reg SHO Short Sale Test | 3 |
+| **Total** | | | **4,115,178** |
+
+> [!NOTE]
+> **Displayed vs Non-Displayed Executions:**
+> - **Displayed Executions (`'E'` + `'C'` = 122,360):** These executions match directly against visible resting limit orders in the book, advancing queue positions and triggering queue-aware fills.
+> - **Non-Displayed Trades (`'P'` = 17,481) and Crosses (`'Q'` = 6):** These reflect hidden liquidity or auction matches and do not deplete visible resting limit queues.
+>
+> **Sampling Note:**
+> Dec 30, 2019 represents a low-volatility holiday-week session, ideal for verifying book correctness, invariants, and memory limits. Prior to finalizing Stage 4 fill comparisons, 2–4 additional dates with varied volatility regimes will be evaluated independently.
 
 Independently verified against raw stream byte framing using `scripts/count_raw_types.py`.

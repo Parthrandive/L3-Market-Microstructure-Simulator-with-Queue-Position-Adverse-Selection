@@ -33,6 +33,8 @@ if(ENABLE_TSAN)
     add_link_options(-fsanitize=thread)
 endif()
 
+find_package(ZLIB REQUIRED)
+
 # Core order book library
 add_library(l3_orderbook
     src/order_book.cpp
@@ -42,7 +44,24 @@ target_include_directories(l3_orderbook PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+target_link_libraries(l3_orderbook PUBLIC
+    ZLIB::ZLIB
+)
+
 target_compile_options(l3_orderbook PRIVATE
+    -Wall -Wextra -Werror -pedantic
+)
+
+# Reference runner executable
+add_executable(reference_runner
+    src/reference_runner.cpp
+)
+
+target_link_libraries(reference_runner PRIVATE
+    l3_orderbook
+)
+
+target_compile_options(reference_runner PRIVATE
     -Wall -Wextra -Werror -pedantic
 )
 
@@ -62,6 +81,7 @@ if(BUILD_TESTS)
     enable_testing()
     add_executable(l3_tests
         tests/test_main.cpp
+        tests/test_parser_and_reference.cpp
     )
 
     target_link_libraries(l3_tests PRIVATE
