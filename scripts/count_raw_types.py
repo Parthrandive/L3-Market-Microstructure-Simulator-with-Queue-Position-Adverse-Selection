@@ -7,9 +7,10 @@ and type distributions directly from an ITCH 5.0 byte stream.
 """
 
 import gzip
-import struct
 import sys
 from collections import Counter
+
+BUFFER_CHUNK = 8 * 1024 * 1024  # 8 MB buffer
 
 
 def count_raw_stream(filepath, max_messages=0):
@@ -19,24 +20,35 @@ def count_raw_stream(filepath, max_messages=0):
     type_counts = Counter()
     locate_counts = Counter()
     total = 0
+    buf = bytearray()
 
     try:
         while True:
-            header = f.read(2)
-            if not header or len(header) < 2:
+            chunk = f.read(BUFFER_CHUNK)
+            if not chunk:
                 break
-            length = struct.unpack(">H", header)[0]
-            payload = f.read(length)
-            if len(payload) < length:
-                break
+            buf.extend(chunk)
 
-            total += 1
-            msg_type = chr(payload[0])
-            locate = struct.unpack(">H", payload[1:3])[0]
+            pos = 0
+            blen = len(buf)
+            while pos + 2 <= blen:
+                msg_len = (buf[pos] << 8) | buf[pos + 1]
+                rec_end = pos + 2 + msg_len
+                if rec_end > blen:
+                    break
 
-            type_counts[msg_type] += 1
-            locate_counts[locate] += 1
+                total += 1
+                msg_type = chr(buf[pos + 2])
+                locate = (buf[pos + 3] << 8) | buf[pos + 4]
 
+                type_counts[msg_type] += 1
+                locate_counts[locate] += 1
+
+                pos = rec_end
+                if max_messages and total >= max_messages:
+                    break
+
+            del buf[:pos]
             if max_messages and total >= max_messages:
                 break
     finally:

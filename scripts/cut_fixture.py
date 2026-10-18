@@ -1,26 +1,14 @@
 #!/usr/bin/env python3
 """
-cut_fixture.py - Cuts a 3-symbol ITCH 5.0 fixture (AAPL, SPY, NVDA) from a Nasdaq ITCH 5.0 feed.
+cut_fixture.py - High-speed extraction of 3-symbol ITCH 5.0 fixture (AAPL, SPY, NVDA).
 
 Streams compressed ITCH 5.0 data (from a local file or HTTP URL) without unpacking
-the multi-gigabyte file onto disk.
-
-ITCH 5.0 framing:
-  Each record begins with a 2-byte big-endian length prefix N,
-  followed by N bytes of payload.
-  Payload structure:
-    Offset 0:    Message Type (1 byte, char)
-    Offset 1-2:  Stock Locate (2 bytes, uint16_t, big-endian)
-    Offset 3-4:  Tracking Number (2 bytes, uint16_t, big-endian)
-    Offset 5-10: Timestamp (6 bytes, uint48_t, big-endian, nanoseconds since midnight)
-    ...
-  For 'R' (Stock Directory):
-    Offset 11-18: Stock Symbol (8 bytes, ASCII, right space-padded)
+the multi-gigabyte file onto disk. Uses a large block-buffered framing reader
+to achieve millions of messages per second.
 """
 
 import argparse
 import gzip
-import io
 import os
 import struct
 import sys
@@ -29,13 +17,14 @@ import urllib.request
 from collections import Counter
 from typing import Dict, Set
 
+BUFFER_CHUNK = 8 * 1024 * 1024  # 8 MB read buffer
+
 
 def open_input_stream(source: str):
     """Opens a local file or HTTP URL as a gzipped binary stream."""
     if source.startswith("http://") or source.startswith("https://"):
         req = urllib.request.Request(source, headers={"User-Agent": "Mozilla/5.0"})
         resp = urllib.request.urlopen(req)
-        # Wrap response in GzipFile for streaming decompression
         return gzip.GzipFile(fileobj=resp), resp
     else:
         if source.endswith(".gz"):
@@ -51,7 +40,7 @@ def cut_itch_fixture(
     target_symbols: Set[str],
     max_messages: int = 0,
     keep_all_r: bool = False,
-    progress_interval: int = 5_000_000,
+    progress_interval: int = 25_000_000,
 ):
     print(f"Opening source: {source}")
     stream, raw_handle = open_input_stream(source)
@@ -70,69 +59,76 @@ def cut_itch_fixture(
     counts_by_symbol = Counter()
 
     start_time = time.time()
-    last_log_time = start_time
+    buf = bytearray()
 
     try:
         while True:
-            len_bytes = stream.read(2)
-            if not len_bytes or len(len_bytes) < 2:
+            chunk = stream.read(BUFFER_CHUNK)
+            if not chunk:
                 break
+            buf.extend(chunk)
 
-            msg_len = struct.unpack(">H", len_bytes)[0]
-            payload = stream.read(msg_len)
-            if len(payload) < msg_len:
-                break
+            pos = 0
+            blen = len(buf)
 
-            total_read += 1
-            msg_type = chr(payload[0])
+            while pos + 2 <= blen:
+                msg_len = (buf[pos] << 8) | buf[pos + 1]
+                rec_end = pos + 2 + msg_len
+                if rec_end > blen:
+                    break
 
-            # Handle Stock Directory ('R') to map locate code -> symbol
-            if msg_type == "R":
-                locate = struct.unpack(">H", payload[1:3])[0]
-                stock = payload[11:19].decode("ascii", errors="ignore").strip()
-                locate_to_symbol[locate] = stock
-                if stock in target_symbols:
-                    symbol_to_locate[stock] = locate
-                    target_locates.add(locate)
-                    print(f"  [Directory] Found target {stock:8s} -> locate {locate}")
+                total_read += 1
+                payload_start = pos + 2
+                msg_type_byte = buf[payload_start]
+                msg_type = chr(msg_type_byte)
+                locate = (buf[payload_start + 1] << 8) | buf[payload_start + 2]
 
-            # Determine whether to retain message
-            keep = False
-            # 1. Keep system events ('S')
-            if msg_type == "S":
-                keep = True
-                counts_by_symbol["SYSTEM"] += 1
-            # 2. Keep 'R' directory messages for targets (or all if specified)
-            elif msg_type == "R":
-                locate = struct.unpack(">H", payload[1:3])[0]
-                if keep_all_r or locate in target_locates:
+                # Handle Stock Directory ('R') to map locate code -> symbol
+                if msg_type == "R":
+                    stock_bytes = buf[payload_start + 11 : payload_start + 19]
+                    stock = stock_bytes.decode("ascii", errors="ignore").strip()
+                    locate_to_symbol[locate] = stock
+                    if stock in target_symbols:
+                        symbol_to_locate[stock] = locate
+                        target_locates.add(locate)
+                        print(f"  [Directory] Found target {stock:8s} -> locate {locate}")
+
+                keep = False
+                if msg_type == "S":
                     keep = True
-                    stock = locate_to_symbol.get(locate, "UNKNOWN")
-                    counts_by_symbol[stock] += 1
-            # 3. Check stock locate for all order book / trading events
-            else:
-                locate = struct.unpack(">H", payload[1:3])[0]
-                if locate in target_locates:
-                    keep = True
-                    stock = locate_to_symbol.get(locate, f"LOC_{locate}")
-                    counts_by_symbol[stock] += 1
+                    counts_by_symbol["SYSTEM"] += 1
+                elif msg_type == "R":
+                    if keep_all_r or locate in target_locates:
+                        keep = True
+                        stock = locate_to_symbol.get(locate, "UNKNOWN")
+                        counts_by_symbol[stock] += 1
+                else:
+                    if locate in target_locates:
+                        keep = True
+                        stock = locate_to_symbol.get(locate, f"LOC_{locate}")
+                        counts_by_symbol[stock] += 1
 
-            if keep:
-                out_file.write(len_bytes)
-                out_file.write(payload)
-                total_written += 1
-                counts_by_type[msg_type] += 1
+                if keep:
+                    out_file.write(buf[pos:rec_end])
+                    total_written += 1
+                    counts_by_type[msg_type] += 1
 
-            if total_read % progress_interval == 0:
-                elapsed = time.time() - start_time
-                mps = total_read / elapsed if elapsed > 0 else 0
-                print(
-                    f"Processed {total_read:,} messages ({mps:,.0f} msg/s) | "
-                    f"Kept {total_written:,} | Target locates found: {len(target_locates)}/{len(target_symbols)}"
-                )
+                pos = rec_end
 
+                if total_read % progress_interval == 0:
+                    elapsed = time.time() - start_time
+                    mps = total_read / elapsed if elapsed > 0 else 0
+                    print(
+                        f"Processed {total_read:,} messages ({mps:,.0f} msg/s) | "
+                        f"Kept {total_written:,} | Target locates found: {len(target_locates)}/{len(target_symbols)}",
+                        flush=True,
+                    )
+
+                if max_messages > 0 and total_read >= max_messages:
+                    break
+
+            del buf[:pos]
             if max_messages > 0 and total_read >= max_messages:
-                print(f"Reached max message limit: {max_messages:,}")
                 break
 
     finally:
@@ -141,7 +137,7 @@ def cut_itch_fixture(
 
     elapsed = time.time() - start_time
     print("\n--- Cutting Summary ---")
-    print(f"Time taken: {elapsed:.2f} s")
+    print(f"Time taken: {elapsed:.2f} s ({total_read / elapsed:,.0f} msg/s)")
     print(f"Total messages scanned: {total_read:,}")
     print(f"Total messages kept:    {total_written:,}")
     print(f"Target locate mappings: {symbol_to_locate}")
@@ -168,13 +164,13 @@ def main():
     )
     parser.add_argument(
         "--source",
-        default="https://emi.nasdaq.com/ITCH/Nasdaq%20ITCH/12302019.NASDAQ_ITCH50.gz",
+        default="data/raw/12302019.NASDAQ_ITCH50.gz",
         help="Input file (.gz or .bin) or HTTP URL",
     )
     parser.add_argument(
         "--output",
-        default="data/fixture_3symbols.bin.gz",
-        help="Output fixture path (e.g. data/fixture_3symbols.bin or .gz)",
+        default="data/fixture_3symbols_full.bin.gz",
+        help="Output fixture path (e.g. data/fixture_3symbols_full.bin.gz)",
     )
     parser.add_argument(
         "--symbols",
