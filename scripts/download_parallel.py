@@ -10,9 +10,13 @@ import argparse
 import concurrent.futures
 import json
 import os
+import socket
 import sys
 import time
 import urllib.request
+
+# Global socket timeout to prevent any thread from hanging indefinitely
+socket.setdefaulttimeout(15)
 
 CHUNK_SIZE = 4 * 1024 * 1024  # 4 MB blocks
 
@@ -34,13 +38,12 @@ def get_remote_file_size(url: str) -> int:
     with urllib.request.urlopen(req, timeout=10) as resp:
         cr = resp.headers.get("Content-Range")
         if cr:
-            # format: bytes 0-0/3524013057
             return int(cr.split("/")[-1])
     raise RuntimeError(f"Unable to determine file size for {url}")
 
 
-def download_chunk(url: str, filepath: str, chunk_idx: int, start: int, end: int, retries: int = 5):
-    for attempt in range(retries):
+def download_chunk(url: str, filepath: str, chunk_idx: int, start: int, end: int, max_retries: int = 15):
+    for attempt in range(max_retries):
         try:
             req = urllib.request.Request(
                 url,
@@ -49,21 +52,20 @@ def download_chunk(url: str, filepath: str, chunk_idx: int, start: int, end: int
                     "Range": f"bytes={start}-{end}",
                 },
             )
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 data = resp.read()
                 expected = end - start + 1
                 if len(data) != expected:
                     raise IOError(f"Truncated chunk: got {len(data)}, expected {expected}")
 
-                # Thread-safe write at specific offset using file descriptor or separate open
                 with open(filepath, "r+b") as f:
                     f.seek(start)
                     f.write(data)
-                return chunk_idx
+                return chunk_idx, True, None
         except Exception as e:
-            time.sleep(1 + attempt)
-            if attempt == retries - 1:
-                raise e
+            time.sleep(min(1.0 * (attempt + 1), 5.0))
+            if attempt == max_retries - 1:
+                return chunk_idx, False, str(e)
 
 
 def download_file(url: str, output_path: str, max_workers: int = 32):
@@ -112,7 +114,6 @@ def download_file(url: str, output_path: str, max_workers: int = 32):
         return
 
     start_time = time.time()
-    downloaded_bytes = len(completed_chunks) * CHUNK_SIZE
     completed_in_session = 0
 
     def save_state():
@@ -125,30 +126,44 @@ def download_file(url: str, output_path: str, max_workers: int = 32):
                 sf,
             )
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_chunk = {
-            executor.submit(download_chunk, url, output_path, c[0], c[1], c[2]): c
-            for c in remaining_chunks
-        }
+    while remaining_chunks:
+        print(f"\nSubmitting batch of {len(remaining_chunks)} remaining chunks to {max_workers} workers...")
+        failed_chunks = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_chunk = {
+                executor.submit(download_chunk, url, output_path, c[0], c[1], c[2]): c
+                for c in remaining_chunks
+            }
 
-        for future in concurrent.futures.as_completed(future_to_chunk):
-            c_idx = future.result()
-            completed_chunks.add(c_idx)
-            completed_in_session += 1
+            for future in concurrent.futures.as_completed(future_to_chunk):
+                c = future_to_chunk[future]
+                c_idx, success, err = future.result()
+                if success:
+                    completed_chunks.add(c_idx)
+                    completed_in_session += 1
+                else:
+                    failed_chunks.append(c)
 
-            if completed_in_session % 10 == 0 or completed_in_session == len(remaining_chunks):
-                save_state()
-                elapsed = time.time() - start_time
-                done_bytes = len(completed_chunks) * CHUNK_SIZE
-                pct = min(100.0, (len(completed_chunks) / total_chunks) * 100)
-                speed = (completed_in_session * CHUNK_SIZE) / elapsed if elapsed > 0 else 0
-                rem_seconds = (total_size - done_bytes) / speed if speed > 0 else 0
-                print(
-                    f"Progress: {pct:5.1f}% ({len(completed_chunks)}/{total_chunks} chunks) | "
-                    f"Speed: {speed / (1024*1024):.2f} MB/s | "
-                    f"ETA: {rem_seconds / 60:.1f} min",
-                    flush=True,
-                )
+                if completed_in_session % 5 == 0 or len(completed_chunks) == total_chunks:
+                    save_state()
+                    elapsed = time.time() - start_time
+                    done_bytes = len(completed_chunks) * CHUNK_SIZE
+                    pct = min(100.0, (len(completed_chunks) / total_chunks) * 100)
+                    speed = (completed_in_session * CHUNK_SIZE) / elapsed if elapsed > 0 else 0
+                    rem_seconds = (total_size - done_bytes) / speed if speed > 0 else 0
+                    print(
+                        f"Progress: {pct:5.1f}% ({len(completed_chunks)}/{total_chunks} chunks) | "
+                        f"Speed: {speed / (1024*1024):.2f} MB/s | "
+                        f"ETA: {rem_seconds / 60:.1f} min",
+                        flush=True,
+                    )
+
+        if failed_chunks:
+            print(f"Retrying {len(failed_chunks)} chunks that had connection errors...")
+            remaining_chunks = failed_chunks
+            time.sleep(2)
+        else:
+            break
 
     save_state()
     if os.path.exists(state_file):
@@ -171,7 +186,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--workers",
         type=int,
-        default=32,
+        default=36,
         help="Number of parallel worker connections",
     )
     args = parser.parse_args()
