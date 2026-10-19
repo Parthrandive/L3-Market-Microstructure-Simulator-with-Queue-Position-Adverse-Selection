@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <vector>
 #include <cstring>
+#include <filesystem>
 #include "orderbook/itch_parser.hpp"
 #include "reference_book.hpp"
 
@@ -74,6 +75,64 @@ TEST(ItchParserTest, HandBuiltAddOrder) {
     EXPECT_EQ(m.shares, 500);
     EXPECT_EQ(std::string_view(m.stock.data(), 8), "AAPL    ");
     EXPECT_EQ(m.price, 1525872);
+}
+
+// Hand-build raw big-endian bytes for Add Order with MPID ('F')
+TEST(ItchParserTest, HandBuiltAddOrderWithMPID) {
+    // Length: 40 bytes payload (indices 0..39)
+    uint8_t raw[40] = {
+        'F',                    // 0: type
+        0x1D, 0x1B,             // 1..2: stock_locate = 7451 (SPY)
+        0x00, 0x55,             // 3..4: tracking = 85
+        0x00, 0x00, 0x99, 0x88, 0x77, 0x66, // 5..10: timestamp
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // 11..18: order_ref
+        'S',                    // 19: Sell
+        0x00, 0x00, 0x03, 0xE8, // 20..23: shares = 1000
+        'S', 'P', 'Y', ' ', ' ', ' ', ' ', ' ', // 24..31: stock
+        0x00, 0x31, 0x35, 0xA8, // 32..35: price = 3,225,000 ($322.50)
+        'G', 'S', 'C', 'O'      // 36..39: mpid = Goldman Sachs
+    };
+
+    MockHandler handler;
+    bool ok = ItchParser::parse_record(raw, sizeof(raw), handler);
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(handler.last_add_order.has_value());
+
+    const auto& m = *handler.last_add_order;
+    EXPECT_EQ(m.header.message_type, 'F');
+    EXPECT_EQ(m.header.stock_locate, 7451);
+    EXPECT_EQ(m.order_ref, 0x0102030405060708ULL);
+    EXPECT_EQ(m.side, Side::Sell);
+    EXPECT_EQ(m.shares, 1000);
+    EXPECT_EQ(std::string_view(m.stock.data(), 8), "SPY     ");
+    EXPECT_EQ(m.price, 3225000);
+    EXPECT_EQ(std::string_view(m.mpid.data(), 4), "GSCO");
+}
+
+// Hand-build raw big-endian bytes for Order Executed ('E')
+TEST(ItchParserTest, HandBuiltOrderExecuted) {
+    // Length: 31 bytes payload (indices 0..30)
+    uint8_t raw[31] = {
+        'E',                    // 0: type
+        0x00, 0x0D,             // 1..2: stock_locate = 13 (AAPL)
+        0x00, 0x0A,             // 3..4: tracking = 10
+        0x00, 0x00, 0x11, 0x22, 0x33, 0x44, // 5..10: timestamp
+        0xFE, 0xED, 0xFA, 0xCE, 0x11, 0x22, 0x33, 0x44, // 11..18: order_ref
+        0x00, 0x00, 0x00, 0xFA, // 19..22: executed_shares = 250 (0xFA)
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08  // 23..30: match_number
+    };
+
+    MockHandler handler;
+    bool ok = ItchParser::parse_record(raw, sizeof(raw), handler);
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(handler.last_order_executed.has_value());
+
+    const auto& m = *handler.last_order_executed;
+    EXPECT_EQ(m.header.message_type, 'E');
+    EXPECT_EQ(m.header.stock_locate, 13);
+    EXPECT_EQ(m.order_ref, 0xFEEDFACE11223344ULL);
+    EXPECT_EQ(m.executed_shares, 250);
+    EXPECT_EQ(m.match_number, 0x0102030405060708ULL);
 }
 
 // Hand-build raw big-endian bytes for Order Replace ('U')
@@ -282,7 +341,11 @@ TEST(ReferenceOrderBookTest, ReplayTestSlice) {
     };
 
     TestHandler handler;
-    size_t count = ItchParser::parse_file("data/fixture_3symbols.bin.gz", handler);
+    std::string path = "data/fixture_3symbols.bin.gz";
+    if (!std::filesystem::exists(path)) {
+        path = "../" + path;
+    }
+    size_t count = ItchParser::parse_file(path, handler);
     EXPECT_EQ(count, 16869);
     EXPECT_GT(handler.adds, 0);
     EXPECT_GT(handler.deletes, 0);

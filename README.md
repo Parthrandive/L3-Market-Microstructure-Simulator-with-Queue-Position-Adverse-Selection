@@ -42,6 +42,21 @@ If college exams restrict time, drop stage 5 first, then OBI/VPIN. Never drop st
 - **Order Lookup:** Pre-allocated open-addressed hash table (power-of-2 size, backward-shift deletion) instead of `std::unordered_map`.
 - **Endianness:** Big-endian parsing via `memcpy` and `__builtin_bswap32/64` to maintain alignment and keep UBSan clean.
 
+#### Stage 1 Verification Status (Passed)
+- **Full-day differential test:** Replayed 4,115,178 messages across 17.01 hours (Dec 30, 2019) simultaneously through `OrderBook` (arena) and `ReferenceOrderBook` (`std::map`).
+  - Bit-for-bit parity validated across 8,192 periodic state checkpoints.
+  - End-of-day resting orders: exactly 0 across all 3 tickers (clean reconciliation).
+  - Crossed books: 0 (`best_bid > best_ask`). Locked books: 0 (`best_bid == best_ask`). Missing lookups: 0.
+- **Sanitizers:** Clean under AddressSanitizer and UndefinedBehaviorSanitizer across all 4.1M messages.
+- **Empirical Peaks (Dec 30, 2019):**
+  - AAPL: 27,110 peak resting orders, 5,320 peak active price levels.
+  - NVDA: 12,800 peak resting orders, 3,126 peak active price levels.
+  - SPY: 1,949 peak resting orders, 756 peak active price levels.
+  - Global simultaneous peak resting orders: 41,366.
+- **OrderIdMap Performance (131,072 slots):**
+  - Max probe length: 10 (AAPL), 7 (NVDA), 4 (SPY).
+  - Average probes per insert: 1.01 (SPY), 1.09 (NVDA), 1.22 (AAPL).
+
 ### Stage 2 – Benchmarks
 - Google Benchmark reports throughput (messages/sec).
 - High-resolution timestamp deltas report per-message latency at p50, p99, and p99.9 into pre-allocated bins, with measurement overhead subtracted.

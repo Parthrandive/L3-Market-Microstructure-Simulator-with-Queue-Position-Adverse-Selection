@@ -69,6 +69,23 @@ target_compile_options(reference_runner PRIVATE
     -Wall -Wextra -Werror -pedantic
 )
 
+# Differential parity runner executable
+add_executable(differential_runner
+    src/differential_runner.cpp
+)
+
+target_link_libraries(differential_runner PRIVATE
+    l3_orderbook
+)
+
+target_include_directories(differential_runner PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+)
+
+target_compile_options(differential_runner PRIVATE
+    -Wall -Wextra -Werror -pedantic
+)
+
 # External dependencies via FetchContent
 include(FetchContent)
 
@@ -86,6 +103,7 @@ if(BUILD_TESTS)
     add_executable(l3_tests
         tests/test_main.cpp
         tests/test_parser_and_reference.cpp
+        tests/test_order_book.cpp
     )
 
     target_link_libraries(l3_tests PRIVATE
