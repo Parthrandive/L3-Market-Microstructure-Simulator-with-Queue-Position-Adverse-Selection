@@ -4,7 +4,7 @@
 #include <unordered_map>
 #include <chrono>
 #include "orderbook/itch_parser.hpp"
-#include "orderbook/reference_book.hpp"
+#include "reference_book.hpp"
 
 namespace l3 {
 
@@ -34,42 +34,78 @@ public:
     void on_add_order(const AddOrderMsg& msg) {
         auto it = books_.find(msg.header.stock_locate);
         if (it != books_.end()) {
+            size_t before = it->second.resting_orders_count();
             it->second.add_order(msg.order_ref, msg.side, msg.shares, msg.price);
+            size_t after = it->second.resting_orders_count();
+            if (after > before) {
+                current_global_resting_orders_++;
+                peak_simultaneous_global_resting_orders_ = std::max(
+                    peak_simultaneous_global_resting_orders_, current_global_resting_orders_);
+            }
         }
     }
 
     void on_order_executed(const OrderExecutedMsg& msg) {
         auto it = books_.find(msg.header.stock_locate);
         if (it != books_.end()) {
+            size_t before = it->second.resting_orders_count();
             it->second.execute_order(msg.order_ref, msg.executed_shares);
+            size_t after = it->second.resting_orders_count();
+            if (after < before) {
+                current_global_resting_orders_ -= (before - after);
+            }
         }
     }
 
     void on_order_executed_with_price(const OrderExecutedWithPriceMsg& msg) {
         auto it = books_.find(msg.header.stock_locate);
         if (it != books_.end()) {
+            size_t before = it->second.resting_orders_count();
             it->second.execute_order(msg.order_ref, msg.executed_shares);
+            size_t after = it->second.resting_orders_count();
+            if (after < before) {
+                current_global_resting_orders_ -= (before - after);
+            }
         }
     }
 
     void on_order_cancel(const OrderCancelMsg& msg) {
         auto it = books_.find(msg.header.stock_locate);
         if (it != books_.end()) {
+            size_t before = it->second.resting_orders_count();
             it->second.cancel_order(msg.order_ref, msg.canceled_shares);
+            size_t after = it->second.resting_orders_count();
+            if (after < before) {
+                current_global_resting_orders_ -= (before - after);
+            }
         }
     }
 
     void on_order_delete(const OrderDeleteMsg& msg) {
         auto it = books_.find(msg.header.stock_locate);
         if (it != books_.end()) {
+            size_t before = it->second.resting_orders_count();
             it->second.delete_order(msg.order_ref);
+            size_t after = it->second.resting_orders_count();
+            if (after < before) {
+                current_global_resting_orders_ -= (before - after);
+            }
         }
     }
 
     void on_order_replace(const OrderReplaceMsg& msg) {
         auto it = books_.find(msg.header.stock_locate);
         if (it != books_.end()) {
+            size_t before = it->second.resting_orders_count();
             it->second.replace_order(msg.original_order_ref, msg.new_order_ref, msg.shares, msg.price);
+            size_t after = it->second.resting_orders_count();
+            if (after > before) {
+                current_global_resting_orders_ += (after - before);
+                peak_simultaneous_global_resting_orders_ = std::max(
+                    peak_simultaneous_global_resting_orders_, current_global_resting_orders_);
+            } else if (after < before) {
+                current_global_resting_orders_ -= (before - after);
+            }
         }
     }
 
@@ -83,23 +119,24 @@ public:
         std::cout << "======================================================\n";
         std::cout << "System Events: " << system_events_ << ", Non-displayed Trades: " << trades_ << "\n";
 
-        size_t total_peak_orders = 0;
-        size_t max_symbol_orders = 0;
+        size_t sum_of_peaks = 0;
+        size_t max_single_symbol_peak = 0;
         size_t max_price_levels = 0;
 
         for (auto& [loc, book] : books_) {
             book.print_stats();
             auto s = book.get_stats();
-            total_peak_orders += s.peak_resting_orders;
-            max_symbol_orders = std::max(max_symbol_orders, s.peak_resting_orders);
+            sum_of_peaks += s.peak_resting_orders;
+            max_single_symbol_peak = std::max(max_single_symbol_peak, s.peak_resting_orders);
             max_price_levels = std::max(max_price_levels, s.peak_bid_levels + s.peak_ask_levels);
         }
 
         std::cout << "\n======================================================\n";
-        std::cout << "RECOMMENDED ARENA & HASH TABLE SIZING (FROM MEASUREMENTS):\n";
-        std::cout << "  Single Symbol Max Peak Orders: " << max_symbol_orders << "\n";
-        std::cout << "  Combined Peak Resting Orders:  " << total_peak_orders << "\n";
-        std::cout << "  Peak Active Price Levels:      " << max_price_levels << "\n";
+        std::cout << "EMPIRICAL SIZING MEASUREMENTS (EXACT TRACKED PEAKS):\n";
+        std::cout << "  Single-Symbol Max Peak Resting Orders: " << max_single_symbol_peak << "\n";
+        std::cout << "  Simultaneous Global Peak Resting Orders: " << peak_simultaneous_global_resting_orders_ << "\n";
+        std::cout << "  (Note: Sum of non-simultaneous peaks was " << sum_of_peaks << ")\n";
+        std::cout << "  Peak Active Price Levels on a Symbol:  " << max_price_levels << "\n";
         std::cout << "======================================================\n";
     }
 
@@ -110,6 +147,8 @@ private:
     std::unordered_map<uint16_t, ReferenceOrderBook> books_;
     size_t system_events_{0};
     size_t trades_{0};
+    size_t current_global_resting_orders_{0};
+    size_t peak_simultaneous_global_resting_orders_{0};
 };
 
 } // namespace l3
@@ -125,7 +164,7 @@ int main(int argc, char* argv[]) {
 
     auto dur_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
     std::cout << "\nProcessed " << msgs << " messages in " << dur_ms << " ms ("
-              << (dur_ms > 0 ? (msgs * 1000 / dur_ms) : 0) << " msg/s)\n";
+              << (dur_ms > 0 ? (msgs * 1000 / dur_ms) : 0) << " msg/s) [Release build, single-core]\n";
 
     dispatcher.print_summary();
     return 0;

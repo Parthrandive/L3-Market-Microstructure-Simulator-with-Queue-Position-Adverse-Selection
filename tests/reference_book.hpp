@@ -33,12 +33,13 @@ struct BookStats {
     size_t peak_bid_levels{0};
     size_t peak_ask_levels{0};
     size_t total_distinct_prices_seen{0};
-    size_t total_adds{0};
-    size_t total_executes{0};
-    size_t total_cancels{0};
-    size_t total_deletes{0};
-    size_t total_replaces{0};
-    size_t crossed_book_events{0};
+    size_t total_adds{0};       // Only 'A' and 'F' add messages
+    size_t total_replaces{0};   // 'U' replace messages
+    size_t total_executes{0};   // 'E' and 'C' executions
+    size_t total_cancels{0};    // 'X' partial cancels
+    size_t total_deletes{0};    // 'D' deletes
+    size_t crossed_book_events{0}; // best_bid > best_ask
+    size_t locked_book_events{0};  // best_bid == best_ask
     size_t missing_order_events{0};
     size_t negative_shares_events{0};
 };
@@ -51,31 +52,10 @@ public:
         stats_.stock_locate = locate_;
     }
 
+    // Handles 'A' and 'F'
     void add_order(uint64_t order_ref, Side side, uint32_t shares, uint32_t price) {
         stats_.total_adds++;
-        distinct_prices_.insert(price);
-
-        orders_[order_ref] = ReferenceOrder{
-            .order_ref = order_ref,
-            .side = side,
-            .price = price,
-            .shares = shares
-        };
-
-        if (side == Side::Buy) {
-            auto& lvl = bids_[price];
-            lvl.total_shares += shares;
-            lvl.order_count++;
-            stats_.peak_bid_levels = std::max(stats_.peak_bid_levels, bids_.size());
-        } else {
-            auto& lvl = asks_[price];
-            lvl.total_shares += shares;
-            lvl.order_count++;
-            stats_.peak_ask_levels = std::max(stats_.peak_ask_levels, asks_.size());
-        }
-
-        stats_.peak_resting_orders = std::max(stats_.peak_resting_orders, orders_.size());
-        check_crossed_book();
+        insert_order_internal(order_ref, side, shares, price);
     }
 
     void execute_order(uint64_t order_ref, uint32_t executed_shares) {
@@ -88,11 +68,9 @@ public:
 
         ReferenceOrder& ord = it->second;
         if (executed_shares >= ord.shares) {
-            // Full execution
             remove_from_level(ord.side, ord.price, ord.shares);
             orders_.erase(it);
         } else {
-            // Partial execution
             ord.shares -= executed_shares;
             reduce_level_shares(ord.side, ord.price, executed_shares);
         }
@@ -129,6 +107,7 @@ public:
         orders_.erase(it);
     }
 
+    // Handles 'U' replace
     void replace_order(uint64_t orig_ref, uint64_t new_ref, uint32_t new_shares, uint32_t new_price) {
         stats_.total_replaces++;
         auto it = orders_.find(orig_ref);
@@ -141,7 +120,7 @@ public:
             stats_.missing_order_events++;
         }
 
-        add_order(new_ref, side, new_shares, new_price);
+        insert_order_internal(new_ref, side, new_shares, new_price);
     }
 
     // Book state queries
@@ -175,12 +154,13 @@ public:
         std::cout << "  Peak active bid levels:     " << s.peak_bid_levels << "\n";
         std::cout << "  Peak active ask levels:     " << s.peak_ask_levels << "\n";
         std::cout << "  Total distinct prices seen: " << s.total_distinct_prices_seen << "\n";
-        std::cout << "  Total Adds:                 " << s.total_adds << "\n";
-        std::cout << "  Total Deletes:              " << s.total_deletes << "\n";
-        std::cout << "  Total Replaces:             " << s.total_replaces << "\n";
-        std::cout << "  Total Executes:             " << s.total_executes << "\n";
-        std::cout << "  Total Cancels:              " << s.total_cancels << "\n";
+        std::cout << "  Adds ('A' + 'F'):           " << s.total_adds << "\n";
+        std::cout << "  Replaces ('U'):             " << s.total_replaces << "\n";
+        std::cout << "  Deletes ('D'):              " << s.total_deletes << "\n";
+        std::cout << "  Executions ('E' + 'C'):     " << s.total_executes << "\n";
+        std::cout << "  Cancels ('X'):              " << s.total_cancels << "\n";
         std::cout << "  Crossed book events:        " << s.crossed_book_events << "\n";
+        std::cout << "  Locked book events:         " << s.locked_book_events << "\n";
         std::cout << "  Missing order lookups:      " << s.missing_order_events << "\n";
         std::cout << "  Current resting orders:     " << orders_.size() << "\n";
         if (auto bb = best_bid()) std::cout << "  Final Best Bid:             $" << (bb->first / 10000.0) << " (" << bb->second << " shares)\n";
@@ -188,6 +168,32 @@ public:
     }
 
 private:
+    void insert_order_internal(uint64_t order_ref, Side side, uint32_t shares, uint32_t price) {
+        distinct_prices_.insert(price);
+
+        orders_[order_ref] = ReferenceOrder{
+            .order_ref = order_ref,
+            .side = side,
+            .price = price,
+            .shares = shares
+        };
+
+        if (side == Side::Buy) {
+            auto& lvl = bids_[price];
+            lvl.total_shares += shares;
+            lvl.order_count++;
+            stats_.peak_bid_levels = std::max(stats_.peak_bid_levels, bids_.size());
+        } else {
+            auto& lvl = asks_[price];
+            lvl.total_shares += shares;
+            lvl.order_count++;
+            stats_.peak_ask_levels = std::max(stats_.peak_ask_levels, asks_.size());
+        }
+
+        stats_.peak_resting_orders = std::max(stats_.peak_resting_orders, orders_.size());
+        check_crossed_and_locked_book();
+    }
+
     void reduce_level_shares(Side side, uint32_t price, uint32_t shares) {
         if (side == Side::Buy) {
             auto it = bids_.find(price);
@@ -236,12 +242,14 @@ private:
         }
     }
 
-    void check_crossed_book() {
+    void check_crossed_and_locked_book() {
         if (!bids_.empty() && !asks_.empty()) {
             uint32_t bb = bids_.begin()->first;
             uint32_t ba = asks_.begin()->first;
-            if (bb >= ba) {
+            if (bb > ba) {
                 stats_.crossed_book_events++;
+            } else if (bb == ba) {
+                stats_.locked_book_events++;
             }
         }
     }

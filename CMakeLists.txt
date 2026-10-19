@@ -61,6 +61,10 @@ target_link_libraries(reference_runner PRIVATE
     l3_orderbook
 )
 
+target_include_directories(reference_runner PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+)
+
 target_compile_options(reference_runner PRIVATE
     -Wall -Wextra -Werror -pedantic
 )
@@ -89,12 +93,16 @@ if(BUILD_TESTS)
         GTest::gtest_main
     )
 
+    target_include_directories(l3_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    )
+
     target_compile_options(l3_tests PRIVATE
         -Wall -Wextra -Werror -pedantic
     )
 
     include(GoogleTest)
-    gtest_discover_tests(l3_tests)
+    gtest_discover_tests(l3_tests DISCOVERY_TIMEOUT 30)
 endif()
 
 # Google Benchmark

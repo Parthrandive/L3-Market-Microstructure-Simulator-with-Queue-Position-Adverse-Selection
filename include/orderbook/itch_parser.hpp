@@ -82,7 +82,7 @@ public:
 
         switch (mtype) {
             case 'A': {
-                if (len < 35) return false;
+                if (len < 36) return false;
                 AddOrderMsg msg{
                     .header = header,
                     .order_ref = read_u64_be(p + 11),
@@ -97,7 +97,7 @@ public:
                 return true;
             }
             case 'F': {
-                if (len < 39) return false;
+                if (len < 40) return false;
                 AddOrderMsg msg{
                     .header = header,
                     .order_ref = read_u64_be(p + 11),
@@ -113,7 +113,7 @@ public:
                 return true;
             }
             case 'E': {
-                if (len < 30) return false;
+                if (len < 31) return false;
                 OrderExecutedMsg msg{
                     .header = header,
                     .order_ref = read_u64_be(p + 11),
@@ -124,7 +124,7 @@ public:
                 return true;
             }
             case 'C': {
-                if (len < 35) return false;
+                if (len < 36) return false;
                 OrderExecutedWithPriceMsg msg{
                     .header = header,
                     .order_ref = read_u64_be(p + 11),
@@ -137,7 +137,7 @@ public:
                 return true;
             }
             case 'X': {
-                if (len < 22) return false;
+                if (len < 23) return false;
                 OrderCancelMsg msg{
                     .header = header,
                     .order_ref = read_u64_be(p + 11),
@@ -147,7 +147,7 @@ public:
                 return true;
             }
             case 'D': {
-                if (len < 18) return false;
+                if (len < 19) return false;
                 OrderDeleteMsg msg{
                     .header = header,
                     .order_ref = read_u64_be(p + 11)
@@ -156,7 +156,7 @@ public:
                 return true;
             }
             case 'U': {
-                if (len < 34) return false;
+                if (len < 35) return false;
                 OrderReplaceMsg msg{
                     .header = header,
                     .original_order_ref = read_u64_be(p + 11),
@@ -168,7 +168,7 @@ public:
                 return true;
             }
             case 'P': {
-                if (len < 43) return false;
+                if (len < 44) return false;
                 TradeMsg msg{
                     .header = header,
                     .order_ref = read_u64_be(p + 11),
@@ -185,7 +185,7 @@ public:
                 return true;
             }
             case 'Q': {
-                if (len < 39) return false;
+                if (len < 40) return false;
                 TradeMsg msg{
                     .header = header,
                     .order_ref = 0,
@@ -202,7 +202,7 @@ public:
                 return true;
             }
             case 'S': {
-                if (len < 11) return false;
+                if (len < 12) return false;
                 SystemEventMsg msg{
                     .header = header,
                     .event_code = static_cast<char>(p[11])
@@ -211,7 +211,7 @@ public:
                 return true;
             }
             case 'R': {
-                if (len < 38) return false;
+                if (len < 39) return false;
                 StockDirectoryMsg msg{
                     .header = header,
                     .stock = {},
