@@ -239,6 +239,28 @@ public:
         }
     }
 
+    // Zero-overhead memory-mapped or pre-buffered ITCH parser (no I/O, no decompression)
+    template<typename Handler>
+    static size_t parse_buffer(const uint8_t* data, size_t size, Handler& handler, size_t max_messages = 0) {
+        size_t pos = 0;
+        size_t messages_parsed = 0;
+
+        while (pos + 2 <= size) {
+            const uint16_t msg_len = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
+            const size_t rec_end = pos + 2 + msg_len;
+            if (rec_end > size) [[unlikely]] break;
+
+            parse_record(data + pos + 2, msg_len, handler);
+            messages_parsed++;
+            pos = rec_end;
+
+            if (max_messages > 0 && messages_parsed >= max_messages) {
+                break;
+            }
+        }
+        return messages_parsed;
+    }
+
     static std::vector<uint8_t>& get_stream_buffer() {
         constexpr size_t BUF_CAP = 8 * 1024 * 1024; // 8 MB read buffer
         static thread_local std::vector<uint8_t> buffer(BUF_CAP);

@@ -20,6 +20,12 @@ struct OrderBookConfig {
     size_t order_map_capacity{131072};     // Power-of-2 capacity for order-ID hash table
 };
 
+enum class LevelMutation : uint8_t {
+    None = 0,         // Mutated order inside existing price level
+    LevelCreated = 1, // New price level created and inserted into sorted array
+    LevelRemoved = 2  // Empty price level removed from sorted array
+};
+
 // High-performance L3 Limit Order Book with zero allocations on the hot path.
 // Backed by a 32-byte OrderNode pool, stable PriceLevel pool, open-addressed
 // order-ID hash table, and tail-touch sorted level arrays.
@@ -46,11 +52,12 @@ public:
     }
 
     // Handles 'A' and 'F' add messages
-    void add_order(uint64_t order_ref, Side side, uint32_t shares, uint32_t price, size_t msg_idx = 0) {
+    LevelMutation add_order(uint64_t order_ref, Side side, uint32_t shares, uint32_t price, size_t msg_idx = 0) {
         uint32_t node_idx = order_pool_.allocate(msg_idx);
         uint32_t level_idx = (side == Side::Buy) ? bids_.find(price) : asks_.find(price);
+        bool level_created = (level_idx == NULL_INDEX);
 
-        if (level_idx == NULL_INDEX) {
+        if (level_created) {
             level_idx = level_pool_.allocate(msg_idx);
             PriceLevel& lvl = level_pool_[level_idx];
             lvl = PriceLevel{
@@ -97,53 +104,63 @@ public:
         level.order_count++;
 
         order_map_.insert(order_ref, node_idx, msg_idx);
+        return level_created ? LevelMutation::LevelCreated : LevelMutation::None;
     }
 
     // Handles 'E' and 'C' executions
-    void execute_order(uint64_t order_ref, uint32_t executed_shares) {
+    LevelMutation execute_order(uint64_t order_ref, uint32_t executed_shares) {
         uint32_t node_idx = order_map_.find(order_ref);
-        if (node_idx == NULL_INDEX) [[unlikely]] return;
+        if (node_idx == NULL_INDEX) [[unlikely]] return LevelMutation::None;
 
         OrderNode& node = order_pool_[node_idx];
         if (executed_shares >= node.shares) {
-            remove_order_internal(node_idx, order_ref);
+            bool rem = remove_order_internal(node_idx, order_ref);
+            return rem ? LevelMutation::LevelRemoved : LevelMutation::None;
         } else {
             node.shares -= executed_shares;
             level_pool_[node.level_idx].total_shares -= executed_shares;
+            return LevelMutation::None;
         }
     }
 
     // Handles 'X' partial cancels
-    void cancel_order(uint64_t order_ref, uint32_t canceled_shares) {
+    LevelMutation cancel_order(uint64_t order_ref, uint32_t canceled_shares) {
         uint32_t node_idx = order_map_.find(order_ref);
-        if (node_idx == NULL_INDEX) [[unlikely]] return;
+        if (node_idx == NULL_INDEX) [[unlikely]] return LevelMutation::None;
 
         OrderNode& node = order_pool_[node_idx];
         if (canceled_shares >= node.shares) {
-            remove_order_internal(node_idx, order_ref);
+            bool rem = remove_order_internal(node_idx, order_ref);
+            return rem ? LevelMutation::LevelRemoved : LevelMutation::None;
         } else {
             node.shares -= canceled_shares;
             level_pool_[node.level_idx].total_shares -= canceled_shares;
+            return LevelMutation::None;
         }
     }
 
     // Handles 'D' deletes
-    void delete_order(uint64_t order_ref) {
+    LevelMutation delete_order(uint64_t order_ref) {
         uint32_t node_idx = order_map_.find(order_ref);
-        if (node_idx == NULL_INDEX) [[unlikely]] return;
+        if (node_idx == NULL_INDEX) [[unlikely]] return LevelMutation::None;
 
-        remove_order_internal(node_idx, order_ref);
+        bool rem = remove_order_internal(node_idx, order_ref);
+        return rem ? LevelMutation::LevelRemoved : LevelMutation::None;
     }
 
     // Handles 'U' replaces
-    void replace_order(uint64_t orig_ref, uint64_t new_ref, uint32_t new_shares, uint32_t new_price, size_t msg_idx = 0) {
+    LevelMutation replace_order(uint64_t orig_ref, uint64_t new_ref, uint32_t new_shares, uint32_t new_price, size_t msg_idx = 0) {
         uint32_t orig_idx = order_map_.find(orig_ref);
         Side side = Side::Buy;
+        bool old_removed = false;
         if (orig_idx != NULL_INDEX) {
             side = order_pool_[orig_idx].side;
-            remove_order_internal(orig_idx, orig_ref);
+            old_removed = remove_order_internal(orig_idx, orig_ref);
         }
-        add_order(new_ref, side, new_shares, new_price, msg_idx);
+        LevelMutation add_mut = add_order(new_ref, side, new_shares, new_price, msg_idx);
+        if (add_mut == LevelMutation::LevelCreated) return LevelMutation::LevelCreated;
+        if (old_removed) return LevelMutation::LevelRemoved;
+        return LevelMutation::None;
     }
 
     // Book inspection queries
@@ -213,7 +230,7 @@ public:
     [[nodiscard]] const Pool<PriceLevel>& level_pool() const noexcept { return level_pool_; }
 
 private:
-    void remove_order_internal(uint32_t node_idx, uint64_t order_ref) {
+    bool remove_order_internal(uint32_t node_idx, uint64_t order_ref) {
         OrderNode& node = order_pool_[node_idx];
         PriceLevel& level = level_pool_[node.level_idx];
 
@@ -242,6 +259,7 @@ private:
         order_map_.erase(order_ref);
 
         // If level is now empty, remove from active sorted levels and deallocate level
+        bool level_removed = false;
         if (level.order_count == 0) {
             if (level_side == Side::Buy) {
                 bids_.remove(level_price);
@@ -249,7 +267,9 @@ private:
                 asks_.remove(level_price);
             }
             level_pool_.deallocate(level_idx);
+            level_removed = true;
         }
+        return level_removed;
     }
 
     std::string symbol_{};

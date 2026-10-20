@@ -11,6 +11,8 @@ cmake-build-*/
 # Large data files
 data/raw/
 data/*.gz
+data/*.raw
+*.raw
 !data/fixture_3symbols.bin.gz
 
 # Python

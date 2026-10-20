@@ -43,7 +43,7 @@ If college exams restrict time, drop stage 5 first, then OBI/VPIN. Never drop st
 - **Endianness:** Big-endian parsing via `memcpy` and `__builtin_bswap32/64` to maintain alignment and keep UBSan clean.
 
 #### Stage 1 Verification Status (Passed)
-- **Zero-Allocation Proof:** Overrode global `operator new` and `operator delete` with an atomic counter. Across the entire 4,115,178-message replay post-setup, hot-path allocations were measured at **exactly 0** (0 bytes / 0 allocations).
+- **Zero-Allocation Proof:** Overrode global `operator new` and `operator delete` with an atomic counter. Across the entire 4,115,178-message replay post-setup, hot-path allocations were measured at **0 operator-new calls during replay** (0 bytes / 0 allocations from engine code).
 - **Queue-Order Parity Proof:** Replayed 4,115,178 messages across 17.01 hours (Dec 30, 2019) simultaneously through `OrderBook` (arena) and `ReferenceOrderBook` (`std::map`).
   - Best bid and best ask were asserted to match identically after **every single message update** (4,096,185 book updates).
   - Across 8,192 periodic snapshots and at EOD, each active price level's complete FIFO sequence of `order_ref`s was extracted and verified bit-for-bit identical with the reference queue.
@@ -53,7 +53,7 @@ If college exams restrict time, drop stage 5 first, then OBI/VPIN. Never drop st
 - **Full-Day Replay Throughput (Apple M-series, single-core, Release build, 5 repeated runs):**
   - `ReferenceOrderBook`: Median **646.0 ms** (spread: 636 ms – 655 ms, ~6.37M msg/s).
   - `OrderBook` (Arena): Median **381.0 ms** (spread: 363 ms – 427 ms, ~10.80M msg/s).
-  - Real Full-Day Speedup: **1.70×**.
+  - End-to-end replay speedup, including gzip: **1.70×** (isolated book speedup measured in Stage 2 via mmap).
 - **Sanitizers:** Clean under AddressSanitizer and UndefinedBehaviorSanitizer across all 24 unit tests and the full 4.1M-message replay.
 - **Empirical Peaks (Dec 30, 2019):**
   - AAPL: 27,110 peak resting orders, 5,320 peak active price levels.
@@ -64,11 +64,26 @@ If college exams restrict time, drop stage 5 first, then OBI/VPIN. Never drop st
   - Max probe length: 10 (AAPL), 7 (NVDA), 4 (SPY).
   - Average probes per insert: 1.01 (SPY), 1.09 (NVDA), 1.22 (AAPL).
 
-### Stage 2 – Benchmarks
-- Google Benchmark reports throughput (messages/sec).
-- High-resolution timestamp deltas report per-message latency at p50, p99, and p99.9 into pre-allocated bins, with measurement overhead subtracted.
-- Pinned core execution; CPU model, OS, and compiler flags recorded.
-- ASan, UBSan, and TSan clean.
+### Stage 2 – Benchmarks (Completed & Verified)
+*All numbers directly quoted from [BENCHMARKS.md](BENCHMARKS.md) (measured on Apple Silicon arm64, single-core, AppleClang 17.0.0, `-O3 -DNDEBUG`).*
+
+- **MMAP Replay Throughput (10 Runs post-warmup, no I/O, no zlib):**
+  - **Decode Only:** Median **22.16 ms** (**185.71M msg/s**, 5.38 ns/msg)
+  - **Arena Book Only:** Median **179.89 ms** (**22.88M msg/s**, 43.7 ns/msg)
+  - **Reference Book Only:** Median **468.12 ms** (**8.79M msg/s**, 113.8 ns/msg)
+  - **Isolated Book Speedup:** **2.60×** (Total in-memory speedup: **2.43×**)
+- **Zero-Allocation Verification on MMAP:** Exactly **0 heap allocations** across all 4,115,178 messages.
+- **Batch Latency (`Batch time / 64` on 24 MHz Apple Silicon clock):**
+  - p50: **72.3 ns/msg** | p90: **97.7 ns/msg** | p99: **181.0 ns/msg** | p99.9: **819.7 ns/msg**
+- **Tail Attribution by Operation & Level Mutation:**
+  - Adding to an existing level: p50 = 42 ns, p99.9 = **375 ns**
+  - Creating a new price level (8-byte `LevelRef` vector insert): p50 = 83 ns, p99.9 = **625 ns** (~250 ns tail contribution)
+- **Multi-Day Headroom Verification:**
+  - Replayed both holiday-lull (`12302019`) and FOMC rate decision (`10302019`) sessions.
+  - Largest measured resting peak: **30,483** orders (AAPL on FOMC day), utilizing 46.51% of the 65,536 pool ($>2.1\times$ margin).
+  - Both sessions passed 100% full-day differential parity with bit-for-bit identical FIFO queue sequences.
+
+See [BENCHMARKS.md](BENCHMARKS.md) for full run protocols, sample distributions, and hardware specifications.
 
 ### Stage 3 – Queue Position and Latency
 - Lock-free SPSC ring buffer between the feed reader and the book thread, verified under TSan.

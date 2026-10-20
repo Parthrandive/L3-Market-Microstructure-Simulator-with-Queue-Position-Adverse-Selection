@@ -163,4 +163,21 @@ if(BUILD_BENCHMARKS)
     target_compile_options(l3_benchmarks PRIVATE
         -Wall -Wextra -Werror -pedantic
     )
+
+    # Stage 2 isolated MMAP throughput, batch distribution, and tail attribution benchmark
+    add_executable(bench_stage2
+        benchmarks/bench_stage2.cpp
+    )
+
+    target_link_libraries(bench_stage2 PRIVATE
+        l3_orderbook
+    )
+
+    target_include_directories(bench_stage2 PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    )
+
+    target_compile_options(bench_stage2 PRIVATE
+        -Wall -Wextra -Werror -pedantic
+    )
 endif()
