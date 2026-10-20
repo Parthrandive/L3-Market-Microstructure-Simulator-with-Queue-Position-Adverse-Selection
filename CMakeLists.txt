@@ -38,6 +38,7 @@ find_package(ZLIB REQUIRED)
 # Core order book library
 add_library(l3_orderbook
     src/order_book.cpp
+    src/allocation_tracker.cpp
 )
 
 target_include_directories(l3_orderbook PUBLIC
@@ -83,6 +84,23 @@ target_include_directories(differential_runner PRIVATE
 )
 
 target_compile_options(differential_runner PRIVATE
+    -Wall -Wextra -Werror -pedantic
+)
+
+# Arena runner executable (standalone engine benchmark + zero-allocation proof)
+add_executable(arena_runner
+    src/arena_runner.cpp
+)
+
+target_link_libraries(arena_runner PRIVATE
+    l3_orderbook
+)
+
+target_include_directories(arena_runner PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests
+)
+
+target_compile_options(arena_runner PRIVATE
     -Wall -Wextra -Werror -pedantic
 )
 

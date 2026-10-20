@@ -56,7 +56,9 @@ static void BM_OrderBook_AddAndCancel(benchmark::State& state) {
 
     for (auto _ : state) {
         book.add_order(ref, Side::Buy, 100, 3200000);
+        benchmark::DoNotOptimize(book.best_bid());
         book.cancel_order(ref, 100);
+        benchmark::DoNotOptimize(book.best_bid());
         ref++;
     }
 }
@@ -68,7 +70,9 @@ static void BM_ReferenceOrderBook_AddAndCancel(benchmark::State& state) {
 
     for (auto _ : state) {
         book.add_order(ref, Side::Buy, 100, 3200000);
+        benchmark::DoNotOptimize(book.best_bid());
         book.cancel_order(ref, 100);
+        benchmark::DoNotOptimize(book.best_bid());
         ref++;
     }
 }

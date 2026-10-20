@@ -43,11 +43,18 @@ If college exams restrict time, drop stage 5 first, then OBI/VPIN. Never drop st
 - **Endianness:** Big-endian parsing via `memcpy` and `__builtin_bswap32/64` to maintain alignment and keep UBSan clean.
 
 #### Stage 1 Verification Status (Passed)
-- **Full-day differential test:** Replayed 4,115,178 messages across 17.01 hours (Dec 30, 2019) simultaneously through `OrderBook` (arena) and `ReferenceOrderBook` (`std::map`).
-  - Bit-for-bit parity validated across 8,192 periodic state checkpoints.
+- **Zero-Allocation Proof:** Overrode global `operator new` and `operator delete` with an atomic counter. Across the entire 4,115,178-message replay post-setup, hot-path allocations were measured at **exactly 0** (0 bytes / 0 allocations).
+- **Queue-Order Parity Proof:** Replayed 4,115,178 messages across 17.01 hours (Dec 30, 2019) simultaneously through `OrderBook` (arena) and `ReferenceOrderBook` (`std::map`).
+  - Best bid and best ask were asserted to match identically after **every single message update** (4,096,185 book updates).
+  - Across 8,192 periodic snapshots and at EOD, each active price level's complete FIFO sequence of `order_ref`s was extracted and verified bit-for-bit identical with the reference queue.
   - End-of-day resting orders: exactly 0 across all 3 tickers (clean reconciliation).
   - Crossed books: 0 (`best_bid > best_ask`). Locked books: 0 (`best_bid == best_ask`). Missing lookups: 0.
-- **Sanitizers:** Clean under AddressSanitizer and UndefinedBehaviorSanitizer across all 4.1M messages.
+- **64-Byte Cache-Line Alignment:** `Pool<T>` base storage allocated with 64-byte alignment (`posix_memalign`). For 32-byte `OrderNode`, index `2k` and `2k+1` are strictly packed into the same 64-byte L1 cache line (verified via runtime assertions and unit test).
+- **Full-Day Replay Throughput (Apple M-series, single-core, Release build, 5 repeated runs):**
+  - `ReferenceOrderBook`: Median **646.0 ms** (spread: 636 ms – 655 ms, ~6.37M msg/s).
+  - `OrderBook` (Arena): Median **381.0 ms** (spread: 363 ms – 427 ms, ~10.80M msg/s).
+  - Real Full-Day Speedup: **1.70×**.
+- **Sanitizers:** Clean under AddressSanitizer and UndefinedBehaviorSanitizer across all 24 unit tests and the full 4.1M-message replay.
 - **Empirical Peaks (Dec 30, 2019):**
   - AAPL: 27,110 peak resting orders, 5,320 peak active price levels.
   - NVDA: 12,800 peak resting orders, 3,126 peak active price levels.

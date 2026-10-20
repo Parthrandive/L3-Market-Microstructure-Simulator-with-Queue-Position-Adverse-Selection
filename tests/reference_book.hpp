@@ -17,6 +17,7 @@ namespace l3 {
 struct LevelInfo {
     uint32_t total_shares{0};
     uint32_t order_count{0};
+    std::vector<uint64_t> queue{};
 };
 
 struct ReferenceOrder {
@@ -68,7 +69,7 @@ public:
 
         ReferenceOrder& ord = it->second;
         if (executed_shares >= ord.shares) {
-            remove_from_level(ord.side, ord.price, ord.shares);
+            remove_from_level(ord.side, ord.price, ord.shares, order_ref);
             orders_.erase(it);
         } else {
             ord.shares -= executed_shares;
@@ -86,7 +87,7 @@ public:
 
         ReferenceOrder& ord = it->second;
         if (canceled_shares >= ord.shares) {
-            remove_from_level(ord.side, ord.price, ord.shares);
+            remove_from_level(ord.side, ord.price, ord.shares, order_ref);
             orders_.erase(it);
         } else {
             ord.shares -= canceled_shares;
@@ -103,7 +104,7 @@ public:
         }
 
         ReferenceOrder& ord = it->second;
-        remove_from_level(ord.side, ord.price, ord.shares);
+        remove_from_level(ord.side, ord.price, ord.shares, order_ref);
         orders_.erase(it);
     }
 
@@ -114,7 +115,7 @@ public:
         Side side = Side::Buy;
         if (it != orders_.end()) {
             side = it->second.side;
-            remove_from_level(side, it->second.price, it->second.shares);
+            remove_from_level(side, it->second.price, it->second.shares, orig_ref);
             orders_.erase(it);
         } else {
             stats_.missing_order_events++;
@@ -139,6 +140,32 @@ public:
     [[nodiscard]] size_t resting_orders_count() const noexcept { return orders_.size(); }
     [[nodiscard]] size_t bid_levels_count() const noexcept { return bids_.size(); }
     [[nodiscard]] size_t ask_levels_count() const noexcept { return asks_.size(); }
+
+    [[nodiscard]] std::vector<uint64_t> get_level_queue(Side side, uint32_t price) const {
+        if (side == Side::Buy) {
+            auto it = bids_.find(price);
+            return (it != bids_.end()) ? it->second.queue : std::vector<uint64_t>{};
+        } else {
+            auto it = asks_.find(price);
+            return (it != asks_.end()) ? it->second.queue : std::vector<uint64_t>{};
+        }
+    }
+
+    [[nodiscard]] std::map<uint32_t, std::vector<uint64_t>> get_all_bid_queues() const {
+        std::map<uint32_t, std::vector<uint64_t>> result;
+        for (const auto& [price, lvl] : bids_) {
+            result[price] = lvl.queue;
+        }
+        return result;
+    }
+
+    [[nodiscard]] std::map<uint32_t, std::vector<uint64_t>> get_all_ask_queues() const {
+        std::map<uint32_t, std::vector<uint64_t>> result;
+        for (const auto& [price, lvl] : asks_) {
+            result[price] = lvl.queue;
+        }
+        return result;
+    }
     [[nodiscard]] const std::string& symbol() const noexcept { return symbol_; }
     [[nodiscard]] uint16_t stock_locate() const noexcept { return locate_; }
 
@@ -182,11 +209,13 @@ private:
             auto& lvl = bids_[price];
             lvl.total_shares += shares;
             lvl.order_count++;
+            lvl.queue.push_back(order_ref);
             stats_.peak_bid_levels = std::max(stats_.peak_bid_levels, bids_.size());
         } else {
             auto& lvl = asks_[price];
             lvl.total_shares += shares;
             lvl.order_count++;
+            lvl.queue.push_back(order_ref);
             stats_.peak_ask_levels = std::max(stats_.peak_ask_levels, asks_.size());
         }
 
@@ -216,7 +245,7 @@ private:
         }
     }
 
-    void remove_from_level(Side side, uint32_t price, uint32_t shares) {
+    void remove_from_level(Side side, uint32_t price, uint32_t shares, uint64_t order_ref) {
         if (side == Side::Buy) {
             auto it = bids_.find(price);
             if (it != bids_.end()) {
@@ -224,6 +253,10 @@ private:
                     it->second.total_shares = 0;
                 } else {
                     it->second.total_shares -= shares;
+                }
+                auto q_it = std::find(it->second.queue.begin(), it->second.queue.end(), order_ref);
+                if (q_it != it->second.queue.end()) {
+                    it->second.queue.erase(q_it);
                 }
                 if (it->second.order_count > 0) it->second.order_count--;
                 if (it->second.order_count == 0) bids_.erase(it);
@@ -235,6 +268,10 @@ private:
                     it->second.total_shares = 0;
                 } else {
                     it->second.total_shares -= shares;
+                }
+                auto q_it = std::find(it->second.queue.begin(), it->second.queue.end(), order_ref);
+                if (q_it != it->second.queue.end()) {
+                    it->second.queue.erase(q_it);
                 }
                 if (it->second.order_count > 0) it->second.order_count--;
                 if (it->second.order_count == 0) asks_.erase(it);

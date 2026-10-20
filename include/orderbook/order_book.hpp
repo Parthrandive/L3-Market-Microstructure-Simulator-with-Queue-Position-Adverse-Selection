@@ -4,6 +4,8 @@
 #include <string>
 #include <optional>
 #include <utility>
+#include <map>
+#include <vector>
 #include "orderbook/types.hpp"
 #include "orderbook/order_node.hpp"
 #include "orderbook/pool.hpp"
@@ -31,7 +33,9 @@ public:
           config_(config),
           order_pool_(config.order_pool_capacity, "OrderNodePool (" + symbol_ + ")"),
           level_pool_(config.level_pool_capacity, "PriceLevelPool (" + symbol_ + ")"),
-          order_map_(config.order_map_capacity) {}
+          order_map_(config.order_map_capacity),
+          bids_(config.level_pool_capacity),
+          asks_(config.level_pool_capacity) {}
 
     void clear() {
         order_pool_.reset();
@@ -167,6 +171,39 @@ public:
 
     [[nodiscard]] size_t ask_levels_count() const noexcept {
         return asks_.size();
+    }
+
+    // Sequence of order_ref in FIFO queue for a specific price level
+    [[nodiscard]] std::vector<uint64_t> get_level_queue(Side side, uint32_t price) const {
+        std::vector<uint64_t> queue;
+        uint32_t lvl_idx = (side == Side::Buy) ? bids_.find(price) : asks_.find(price);
+        if (lvl_idx == NULL_INDEX) return queue;
+
+        const PriceLevel& lvl = level_pool_[lvl_idx];
+        uint32_t curr = lvl.head_order_idx;
+        while (curr != NULL_INDEX) {
+            queue.push_back(order_pool_[curr].order_ref);
+            curr = order_pool_[curr].next_idx;
+        }
+        return queue;
+    }
+
+    // Returns map of price -> FIFO order_ref sequence for all active bid levels
+    [[nodiscard]] std::map<uint32_t, std::vector<uint64_t>> get_all_bid_queues() const {
+        std::map<uint32_t, std::vector<uint64_t>> result;
+        for (const auto& ref : bids_.levels()) {
+            result[ref.price] = get_level_queue(Side::Buy, ref.price);
+        }
+        return result;
+    }
+
+    // Returns map of price -> FIFO order_ref sequence for all active ask levels
+    [[nodiscard]] std::map<uint32_t, std::vector<uint64_t>> get_all_ask_queues() const {
+        std::map<uint32_t, std::vector<uint64_t>> result;
+        for (const auto& ref : asks_.levels()) {
+            result[ref.price] = get_level_queue(Side::Sell, ref.price);
+        }
+        return result;
     }
 
     [[nodiscard]] const std::string& symbol() const noexcept { return symbol_; }

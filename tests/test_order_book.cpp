@@ -3,6 +3,7 @@
 #include <vector>
 #include "orderbook/order_book.hpp"
 #include "orderbook/itch_parser.hpp"
+#include "orderbook/allocation_tracker.hpp"
 #include "reference_book.hpp"
 
 using namespace l3;
@@ -39,6 +40,23 @@ TEST(PoolTest, AllocationAndRecycling) {
     EXPECT_EQ(recycled1, idx1);
 
     EXPECT_EQ(pool.allocated_count(), 3);
+}
+
+TEST(PoolTest, SixtyFourByteAlignmentAndCacheLinePacking) {
+    Pool<OrderNode> pool(64, "AlignmentTestPool");
+    EXPECT_TRUE(pool.is_64_byte_aligned());
+
+    uintptr_t base_addr = reinterpret_cast<uintptr_t>(&pool[0]);
+    EXPECT_EQ(base_addr % 64, 0u);
+
+    // OrderNode is 32 bytes. Index 0 and 1 MUST reside in the same 64-byte L1 cache line
+    uintptr_t node0_addr = reinterpret_cast<uintptr_t>(&pool[0]);
+    uintptr_t node1_addr = reinterpret_cast<uintptr_t>(&pool[1]);
+    uintptr_t node2_addr = reinterpret_cast<uintptr_t>(&pool[2]);
+
+    EXPECT_EQ(node0_addr / 64, node1_addr / 64);
+    EXPECT_EQ(node2_addr / 64, (node0_addr / 64) + 1);
+    EXPECT_EQ(node1_addr - node0_addr, 32u);
 }
 
 TEST(OrderIdMapTest, BasicOperations) {
@@ -308,6 +326,14 @@ TEST(OrderBookTest, DifferentialParityOnTestSlice) {
             ASSERT_EQ(ref_ba->second, arena_ba->second)
                 << "Mismatch in best_ask shares at message " << msg_idx;
         }
+
+        // Deep queue-order comparison: assert identical sequence of order_refs at every active level
+        if (msg_idx % 100 == 0 || msg_idx == 999999) {
+            ASSERT_EQ(ref.get_all_bid_queues(), arena.get_all_bid_queues())
+                << "Mismatch in Bid FIFO queue order at message " << msg_idx;
+            ASSERT_EQ(ref.get_all_ask_queues(), arena.get_all_ask_queues())
+                << "Mismatch in Ask FIFO queue order at message " << msg_idx;
+        }
     };
 
     struct DifferentialHandler {
@@ -390,4 +416,101 @@ TEST(OrderBookTest, DifferentialParityOnTestSlice) {
     for (const auto& [loc, pair] : books) {
         check_parity(pair, 999999);
     }
+}
+
+// Zero-allocation proof: Pre-allocate books, enable allocation counter, replay ITCH messages,
+// and prove that operator new count is EXACTLY ZERO on the hot path.
+TEST(OrderBookTest, ZeroAllocationProofOnReplay) {
+    std::string path = "data/fixture_3symbols.bin.gz";
+    if (!std::filesystem::exists(path)) {
+        path = "../" + path;
+    }
+
+    // Pre-allocated books
+    OrderBookConfig cfg{
+        .order_pool_capacity = 4096,
+        .level_pool_capacity = 1024,
+        .order_map_capacity = 8192
+    };
+
+    std::unordered_map<uint16_t, OrderBook> books;
+    books.emplace(7451, OrderBook("SPY", 7451, cfg));
+    books.emplace(13,   OrderBook("AAPL", 13, cfg));
+    books.emplace(6428, OrderBook("NVDA", 6428, cfg));
+
+    struct PureArenaHandler {
+        std::unordered_map<uint16_t, OrderBook>& books_ref;
+        size_t msg_count{0};
+
+        void on_system_event(const SystemEventMsg&) {}
+        void on_stock_directory(const StockDirectoryMsg&) {}
+
+        void on_add_order(const AddOrderMsg& m) {
+            msg_count++;
+            auto it = books_ref.find(m.header.stock_locate);
+            if (it != books_ref.end()) {
+                it->second.add_order(m.order_ref, m.side, m.shares, m.price, msg_count);
+            }
+        }
+
+        void on_order_executed(const OrderExecutedMsg& m) {
+            msg_count++;
+            auto it = books_ref.find(m.header.stock_locate);
+            if (it != books_ref.end()) {
+                it->second.execute_order(m.order_ref, m.executed_shares);
+            }
+        }
+
+        void on_order_executed_with_price(const OrderExecutedWithPriceMsg& m) {
+            msg_count++;
+            auto it = books_ref.find(m.header.stock_locate);
+            if (it != books_ref.end()) {
+                it->second.execute_order(m.order_ref, m.executed_shares);
+            }
+        }
+
+        void on_order_cancel(const OrderCancelMsg& m) {
+            msg_count++;
+            auto it = books_ref.find(m.header.stock_locate);
+            if (it != books_ref.end()) {
+                it->second.cancel_order(m.order_ref, m.canceled_shares);
+            }
+        }
+
+        void on_order_delete(const OrderDeleteMsg& m) {
+            msg_count++;
+            auto it = books_ref.find(m.header.stock_locate);
+            if (it != books_ref.end()) {
+                it->second.delete_order(m.order_ref);
+            }
+        }
+
+        void on_order_replace(const OrderReplaceMsg& m) {
+            msg_count++;
+            auto it = books_ref.find(m.header.stock_locate);
+            if (it != books_ref.end()) {
+                it->second.replace_order(m.original_order_ref, m.new_order_ref, m.shares, m.price, msg_count);
+            }
+        }
+
+        void on_trade(const TradeMsg&) {}
+    };
+
+    PureArenaHandler handler{books, 0};
+
+    // Setup reader buffer before tracking hot-path allocations
+    ItchParser::get_stream_buffer();
+
+    // Begin tracking heap allocations
+    AllocationTracker::start();
+
+    size_t count = ItchParser::parse_file(path, handler);
+
+    AllocationTracker::stop();
+    size_t allocs = AllocationTracker::count();
+
+    EXPECT_EQ(count, 16869);
+    EXPECT_GT(handler.msg_count, 0);
+    // Concrete empirical assertion: ZERO allocations during entire stream replay
+    EXPECT_EQ(allocs, 0u);
 }

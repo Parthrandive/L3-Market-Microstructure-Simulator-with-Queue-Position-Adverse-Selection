@@ -114,13 +114,37 @@ public:
     }
 
     void check_parity(const SymbolPair& pair, size_t msg_idx) {
-        // Periodic full assertions every 500 messages, plus always check resting counts
+        const auto& ref = pair.ref;
+        const auto& arena = pair.arena;
+
+        // 1. Mandatory per-message check: BBO must match identically after EVERY single message
+        auto ref_bb = ref.best_bid();
+        auto arena_bb = arena.best_bid();
+        if (ref_bb != arena_bb) {
+            std::cerr << "\n[MISMATCH at msg " << msg_idx << "] " << pair.symbol << " Best Bid mismatch!\n";
+            if (ref_bb) std::cerr << "  Ref:   Price=" << ref_bb->first << " Shares=" << ref_bb->second << "\n";
+            else        std::cerr << "  Ref:   None\n";
+            if (arena_bb) std::cerr << "  Arena: Price=" << arena_bb->first << " Shares=" << arena_bb->second << "\n";
+            else          std::cerr << "  Arena: None\n";
+            std::abort();
+        }
+
+        auto ref_ba = ref.best_ask();
+        auto arena_ba = arena.best_ask();
+        if (ref_ba != arena_ba) {
+            std::cerr << "\n[MISMATCH at msg " << msg_idx << "] " << pair.symbol << " Best Ask mismatch!\n";
+            if (ref_ba) std::cerr << "  Ref:   Price=" << ref_ba->first << " Shares=" << ref_ba->second << "\n";
+            else        std::cerr << "  Ref:   None\n";
+            if (arena_ba) std::cerr << "  Arena: Price=" << arena_ba->first << " Shares=" << arena_ba->second << "\n";
+            else          std::cerr << "  Arena: None\n";
+            std::abort();
+        }
+
+        // 2. Full deep checkpoint assertion every 500 messages:
+        // Validates order counts, price level counts, AND exact FIFO queue sequences per level
         if (msg_idx % 500 != 0) {
             return;
         }
-
-        const auto& ref = pair.ref;
-        const auto& arena = pair.arena;
 
         if (ref.resting_orders_count() != arena.resting_orders_count()) {
             std::cerr << "\n[MISMATCH at msg " << msg_idx << "] " << pair.symbol
@@ -143,25 +167,20 @@ public:
             std::abort();
         }
 
-        auto ref_bb = ref.best_bid();
-        auto arena_bb = arena.best_bid();
-        if (ref_bb != arena_bb) {
-            std::cerr << "\n[MISMATCH at msg " << msg_idx << "] " << pair.symbol << " Best Bid mismatch!\n";
-            if (ref_bb) std::cerr << "  Ref:   Price=" << ref_bb->first << " Shares=" << ref_bb->second << "\n";
-            else        std::cerr << "  Ref:   None\n";
-            if (arena_bb) std::cerr << "  Arena: Price=" << arena_bb->first << " Shares=" << arena_bb->second << "\n";
-            else          std::cerr << "  Arena: None\n";
+        // Deep queue order comparison: exact sequence of order refs at each level
+        auto ref_bid_queues = ref.get_all_bid_queues();
+        auto arena_bid_queues = arena.get_all_bid_queues();
+        if (ref_bid_queues != arena_bid_queues) {
+            std::cerr << "\n[MISMATCH at msg " << msg_idx << "] " << pair.symbol
+                      << " Bid FIFO queue order mismatch!\n";
             std::abort();
         }
 
-        auto ref_ba = ref.best_ask();
-        auto arena_ba = arena.best_ask();
-        if (ref_ba != arena_ba) {
-            std::cerr << "\n[MISMATCH at msg " << msg_idx << "] " << pair.symbol << " Best Ask mismatch!\n";
-            if (ref_ba) std::cerr << "  Ref:   Price=" << ref_ba->first << " Shares=" << ref_ba->second << "\n";
-            else        std::cerr << "  Ref:   None\n";
-            if (arena_ba) std::cerr << "  Arena: Price=" << arena_ba->first << " Shares=" << arena_ba->second << "\n";
-            else          std::cerr << "  Arena: None\n";
+        auto ref_ask_queues = ref.get_all_ask_queues();
+        auto arena_ask_queues = arena.get_all_ask_queues();
+        if (ref_ask_queues != arena_ask_queues) {
+            std::cerr << "\n[MISMATCH at msg " << msg_idx << "] " << pair.symbol
+                      << " Ask FIFO queue order mismatch!\n";
             std::abort();
         }
 
@@ -200,7 +219,9 @@ public:
             // End-of-day final parity assertion
             if (pair.ref.resting_orders_count() != pair.arena.resting_orders_count() ||
                 pair.ref.best_bid() != pair.arena.best_bid() ||
-                pair.ref.best_ask() != pair.arena.best_ask()) {
+                pair.ref.best_ask() != pair.arena.best_ask() ||
+                pair.ref.get_all_bid_queues() != pair.arena.get_all_bid_queues() ||
+                pair.ref.get_all_ask_queues() != pair.arena.get_all_ask_queues()) {
                 std::cerr << "\n[FATAL] Final EOD parity check failed for " << pair.symbol << "\n";
                 std::abort();
             }

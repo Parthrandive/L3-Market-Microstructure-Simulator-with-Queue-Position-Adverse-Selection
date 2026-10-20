@@ -1,15 +1,30 @@
 #pragma once
 
 #include <cstdint>
-#include <vector>
+#include <memory>
 #include <string>
 #include <iostream>
 #include <cstdlib>
 #include <cstring>
 #include <stdexcept>
+#include <cassert>
+#include <type_traits>
 #include "orderbook/order_node.hpp"
 
 namespace l3 {
+
+template<typename T, size_t Alignment = 64>
+struct AlignedDeleter {
+    void operator()(T* ptr) const noexcept {
+        if (ptr) {
+#if defined(_MSC_VER)
+            _aligned_free(ptr);
+#else
+            std::free(ptr);
+#endif
+        }
+    }
+};
 
 template<typename T>
 class Pool {
@@ -19,8 +34,51 @@ public:
         if (capacity == 0 || capacity > NULL_INDEX) {
             throw std::invalid_argument("Invalid pool capacity");
         }
-        storage_.resize(capacity_);
+
+        size_t total_bytes = capacity_ * sizeof(T);
+        if (total_bytes % 64 != 0) {
+            total_bytes = ((total_bytes / 64) + 1) * 64;
+        }
+
+        void* raw_ptr = nullptr;
+#if defined(_MSC_VER)
+        raw_ptr = _aligned_malloc(total_bytes, 64);
+#else
+        if (posix_memalign(&raw_ptr, 64, total_bytes) != 0) {
+            raw_ptr = nullptr;
+        }
+#endif
+        if (!raw_ptr) {
+            throw std::bad_alloc();
+        }
+
+        storage_.reset(static_cast<T*>(raw_ptr));
+        assert(reinterpret_cast<uintptr_t>(storage_.get()) % 64 == 0 && "Pool base address must be 64-byte aligned");
+
+        for (uint32_t i = 0; i < capacity_; ++i) {
+            new (&storage_[i]) T();
+        }
         reset();
+    }
+
+    ~Pool() {
+        if constexpr (!std::is_trivially_destructible_v<T>) {
+            if (storage_) {
+                for (uint32_t i = 0; i < capacity_; ++i) {
+                    storage_[i].~T();
+                }
+            }
+        }
+    }
+
+    // Move-only semantics (no copying a large pool)
+    Pool(Pool&&) noexcept = default;
+    Pool& operator=(Pool&&) noexcept = default;
+    Pool(const Pool&) = delete;
+    Pool& operator=(const Pool&) = delete;
+
+    [[nodiscard]] bool is_64_byte_aligned() const noexcept {
+        return reinterpret_cast<uintptr_t>(storage_.get()) % 64 == 0;
     }
 
     void reset() {
@@ -97,7 +155,7 @@ private:
     uint32_t allocated_count_{0};
     uint32_t peak_allocated_{0};
     std::string name_{"Pool"};
-    std::vector<T> storage_{};
+    std::unique_ptr<T[], AlignedDeleter<T, 64>> storage_{};
 };
 
 } // namespace l3

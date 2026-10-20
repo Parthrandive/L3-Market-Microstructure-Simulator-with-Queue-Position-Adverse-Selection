@@ -239,14 +239,20 @@ public:
         }
     }
 
+    static std::vector<uint8_t>& get_stream_buffer() {
+        constexpr size_t BUF_CAP = 8 * 1024 * 1024; // 8 MB read buffer
+        static thread_local std::vector<uint8_t> buffer(BUF_CAP);
+        return buffer;
+    }
+
     // High-performance streaming reader for gzipped or raw ITCH files
     template<typename Handler>
     static size_t parse_file(const std::string& path, Handler& handler, size_t max_messages = 0) {
         gzFile gz = gzopen(path.c_str(), "rb");
         if (!gz) return 0;
 
-        constexpr size_t BUF_CAP = 8 * 1024 * 1024; // 8 MB read buffer
-        std::vector<uint8_t> buffer(BUF_CAP);
+        constexpr size_t BUF_CAP = 8 * 1024 * 1024;
+        auto& buffer = get_stream_buffer();
         size_t buf_len = 0;
         size_t messages_parsed = 0;
 

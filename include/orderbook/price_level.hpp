@@ -38,8 +38,8 @@ static_assert(sizeof(LevelRef) == 8, "LevelRef must be exactly 8 bytes");
 template<Side S>
 class SortedLevels {
 public:
-    SortedLevels() {
-        levels_.reserve(2048);
+    explicit SortedLevels(size_t capacity = 8192) {
+        levels_.reserve(capacity);
     }
 
     void clear() noexcept {
