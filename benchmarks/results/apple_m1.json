@@ -1,0 +1,162 @@
+{
+  "context": {
+    "date": "2026-10-20T19:49:55+05:30",
+    "host_name": "Parth-MacBook-Air.local",
+    "executable": "./build/l3_benchmarks",
+    "num_cpus": 8,
+    "mhz_per_cpu": 24,
+    "cpu_scaling_enabled": false,
+    "caches": [
+      {
+        "type": "Data",
+        "level": 1,
+        "size": 65536,
+        "num_sharing": 0
+      },
+      {
+        "type": "Instruction",
+        "level": 1,
+        "size": 131072,
+        "num_sharing": 0
+      },
+      {
+        "type": "Unified",
+        "level": 2,
+        "size": 4194304,
+        "num_sharing": 1
+      }
+    ],
+    "load_avg": [2.52197,2.85645,2.96826],
+    "library_build_type": "release"
+  },
+  "benchmarks": [
+    {
+      "name": "BM_ArenaBook_ReplayMmap/repeats:10/real_time_mean",
+      "family_index": 0,
+      "per_family_instance_index": 0,
+      "run_name": "BM_ArenaBook_ReplayMmap/repeats:10/real_time",
+      "run_type": "aggregate",
+      "repetitions": 10,
+      "threads": 1,
+      "aggregate_name": "mean",
+      "aggregate_unit": "time",
+      "iterations": 10,
+      "real_time": 2.1387568209320307e+08,
+      "cpu_time": 2.1239200000000009e+08,
+      "time_unit": "ns",
+      "items_per_second": 1.9257712546666533e+07
+    },
+    {
+      "name": "BM_ArenaBook_ReplayMmap/repeats:10/real_time_median",
+      "family_index": 0,
+      "per_family_instance_index": 0,
+      "run_name": "BM_ArenaBook_ReplayMmap/repeats:10/real_time",
+      "run_type": "aggregate",
+      "repetitions": 10,
+      "threads": 1,
+      "aggregate_name": "median",
+      "aggregate_unit": "time",
+      "iterations": 10,
+      "real_time": 2.1184252093856534e+08,
+      "cpu_time": 2.1119366666666681e+08,
+      "time_unit": "ns",
+      "items_per_second": 1.9425648240315322e+07
+    },
+    {
+      "name": "BM_ArenaBook_ReplayMmap/repeats:10/real_time_stddev",
+      "family_index": 0,
+      "per_family_instance_index": 0,
+      "run_name": "BM_ArenaBook_ReplayMmap/repeats:10/real_time",
+      "run_type": "aggregate",
+      "repetitions": 10,
+      "threads": 1,
+      "aggregate_name": "stddev",
+      "aggregate_unit": "time",
+      "iterations": 10,
+      "real_time": 6.7393600346259801e+06,
+      "cpu_time": 4.9741872616121564e+06,
+      "time_unit": "ns",
+      "items_per_second": 5.9014916777690861e+05
+    },
+    {
+      "name": "BM_ArenaBook_ReplayMmap/repeats:10/real_time_cv",
+      "family_index": 0,
+      "per_family_instance_index": 0,
+      "run_name": "BM_ArenaBook_ReplayMmap/repeats:10/real_time",
+      "run_type": "aggregate",
+      "repetitions": 10,
+      "threads": 1,
+      "aggregate_name": "cv",
+      "aggregate_unit": "percentage",
+      "iterations": 10,
+      "real_time": 3.1510641923699817e-02,
+      "cpu_time": 2.3419842845362131e-02,
+      "time_unit": "ns",
+      "items_per_second": 3.0644821722560299e-02
+    },
+    {
+      "name": "BM_ReferenceBook_ReplayMmap/repeats:10/real_time_mean",
+      "family_index": 1,
+      "per_family_instance_index": 0,
+      "run_name": "BM_ReferenceBook_ReplayMmap/repeats:10/real_time",
+      "run_type": "aggregate",
+      "repetitions": 10,
+      "threads": 1,
+      "aggregate_name": "mean",
+      "aggregate_unit": "time",
+      "iterations": 10,
+      "real_time": 4.7438539196737111e+08,
+      "cpu_time": 4.6971039999999988e+08,
+      "time_unit": "ns",
+      "items_per_second": 8.6822150102980956e+06
+    },
+    {
+      "name": "BM_ReferenceBook_ReplayMmap/repeats:10/real_time_median",
+      "family_index": 1,
+      "per_family_instance_index": 0,
+      "run_name": "BM_ReferenceBook_ReplayMmap/repeats:10/real_time",
+      "run_type": "aggregate",
+      "repetitions": 10,
+      "threads": 1,
+      "aggregate_name": "median",
+      "aggregate_unit": "time",
+      "iterations": 10,
+      "real_time": 4.6900604199618101e+08,
+      "cpu_time": 4.6699200000000018e+08,
+      "time_unit": "ns",
+      "items_per_second": 8.7742542794727907e+06
+    },
+    {
+      "name": "BM_ReferenceBook_ReplayMmap/repeats:10/real_time_stddev",
+      "family_index": 1,
+      "per_family_instance_index": 0,
+      "run_name": "BM_ReferenceBook_ReplayMmap/repeats:10/real_time",
+      "run_type": "aggregate",
+      "repetitions": 10,
+      "threads": 1,
+      "aggregate_name": "stddev",
+      "aggregate_unit": "time",
+      "iterations": 10,
+      "real_time": 1.5138094055948401e+07,
+      "cpu_time": 7.7228887686789911e+06,
+      "time_unit": "ns",
+      "items_per_second": 2.5977642811679724e+05
+    },
+    {
+      "name": "BM_ReferenceBook_ReplayMmap/repeats:10/real_time_cv",
+      "family_index": 1,
+      "per_family_instance_index": 0,
+      "run_name": "BM_ReferenceBook_ReplayMmap/repeats:10/real_time",
+      "run_type": "aggregate",
+      "repetitions": 10,
+      "threads": 1,
+      "aggregate_name": "cv",
+      "aggregate_unit": "percentage",
+      "iterations": 10,
+      "real_time": 3.1910961661714955e-02,
+      "cpu_time": 1.6441809184295244e-02,
+      "time_unit": "ns",
+      "items_per_second": 2.9920524636705359e-02
+    }
+  ]
+}

@@ -82,6 +82,7 @@ struct BootstrapCI {
     double ci_hi{0.0};
 };
 
+// Summary metrics with accurate statistical labeling
 struct FillModelSummary {
     std::string model_name;
     uint64_t delta_t_ns{0};
@@ -98,19 +99,22 @@ struct FillModelSummary {
     BootstrapCI markout_30s_ci{};
     double mid_drift_30s_bps{0.0}; // markout_30s - half_spread
 
-    // Realized Strategy PnL (for 100 shares per fill)
+    // Mark-to-mid markout PnL, before fees and exit costs
     double total_pnl_5s_usd{0.0};
     double pnl_per_order_5s_usd{0.0};
     double total_pnl_30s_usd{0.0};
     double pnl_per_order_30s_usd{0.0};
+    BootstrapCI pnl_5s_usd_ci{};
     BootstrapCI pnl_30s_usd_ci{};
+    BootstrapCI pnl_ratio_5s_ci{}; // Ratio of Touch 5s PnL to L3 5s PnL
 };
 
 struct SimulationConfig {
     uint64_t delta_t_ns{0};                  // Wire transit latency
-    uint64_t ttl_ns{5'000'000'000ULL};       // 5.0 seconds TTL
+    uint64_t ttl_ns{5'000'000'000ULL};       // TTL in nanoseconds (default 5.0s)
     double obi_threshold{0.0};               // Order Book Imbalance filter
     uint64_t sampling_interval_ns{250'000'000ULL}; // 250 ms sampling rate
+    uint32_t order_shares{100};              // Order size in shares (100 or 500)
 };
 
 class FillSimulationEngine {
@@ -358,7 +362,7 @@ public:
                                 new_ord.stock_locate = locate;
                                 new_ord.side = Side::Buy;
                                 new_ord.price = bb->first;
-                                new_ord.shares = 100;
+                                new_ord.shares = config_.order_shares;
                                 new_ord.submit_ts_ns = current_ts_ns;
                                 new_ord.arrival_ts_ns = current_ts_ns + config_.delta_t_ns;
                                 new_ord.cancel_ts_ns = new_ord.arrival_ts_ns + config_.ttl_ns;
@@ -516,12 +520,10 @@ inline FillModelSummary evaluate_model_performance(
             sum_m5 += m5;
             sum_m30 += m30;
 
-            // PnL in USD for 100 shares: 100 * (mid - price) / 10000 = (mid - price) / 100
-            // Since markout_bps = ((mid - price) / price) * 10000:
-            // (mid - price) = (markout_bps * price) / 10000
-            // PnL ($) = 100 * (markout_bps * price / 10000) / 10000 = (markout_bps * price) / 1'000'000
-            double pnl_5s = (m5 * static_cast<double>(ord.price)) / 1'000'000.0;
-            double pnl_30s = (m30 * static_cast<double>(ord.price)) / 1'000'000.0;
+            // Mark-to-mid markout PnL in USD:
+            double scale = static_cast<double>(ord.shares) / 100.0;
+            double pnl_5s = ((m5 * static_cast<double>(ord.price)) / 1'000'000.0) * scale;
+            double pnl_30s = ((m30 * static_cast<double>(ord.price)) / 1'000'000.0) * scale;
             sum_pnl_5s += pnl_5s;
             sum_pnl_30s += pnl_30s;
             valid_fills++;
@@ -559,7 +561,9 @@ inline FillModelSummary evaluate_model_performance(
     std::vector<double> bs_overstate;
     std::vector<double> bs_lead_time;
     std::vector<double> bs_m1, bs_m5, bs_m30;
+    std::vector<double> bs_pnl_5s;
     std::vector<double> bs_pnl_30s;
+    std::vector<double> bs_pnl_ratios;
 
     bs_fill_rates.reserve(BOOTSTRAP_ITERS);
     bs_overstate.reserve(BOOTSTRAP_ITERS);
@@ -567,7 +571,9 @@ inline FillModelSummary evaluate_model_performance(
     bs_m1.reserve(BOOTSTRAP_ITERS);
     bs_m5.reserve(BOOTSTRAP_ITERS);
     bs_m30.reserve(BOOTSTRAP_ITERS);
+    bs_pnl_5s.reserve(BOOTSTRAP_ITERS);
     bs_pnl_30s.reserve(BOOTSTRAP_ITERS);
+    bs_pnl_ratios.reserve(BOOTSTRAP_ITERS);
 
     for (int iter = 0; iter < BOOTSTRAP_ITERS; ++iter) {
         size_t b_tot = 0;
@@ -576,13 +582,15 @@ inline FillModelSummary evaluate_model_performance(
         double b_sum_lead = 0.0;
         size_t b_lead_count = 0;
         double b_sum_m1 = 0.0, b_sum_m5 = 0.0, b_sum_m30 = 0.0;
-        double b_sum_pnl30 = 0.0;
+        double b_sum_pnl5 = 0.0, b_sum_pnl30 = 0.0;
+        double b_l3_pnl5 = 0.0;
 
         for (int k = 0; k < NUM_BLOCKS; ++k) {
             int sampled_bid = block_dist(rng);
             for (size_t idx : block_order_indices[sampled_bid]) {
                 const auto& ord = orders[idx];
                 b_tot++;
+                double scale = static_cast<double>(ord.shares) / 100.0;
                 bool f = is_touch_model ? ord.touch_filled : ord.l3_filled;
                 if (f) {
                     b_fills++;
@@ -592,10 +600,12 @@ inline FillModelSummary evaluate_model_performance(
                     b_sum_m1 += m1;
                     b_sum_m5 += m5;
                     b_sum_m30 += m30;
-                    b_sum_pnl30 += (m30 * static_cast<double>(ord.price)) / 1'000'000.0;
+                    b_sum_pnl5 += ((m5 * static_cast<double>(ord.price)) / 1'000'000.0) * scale;
+                    b_sum_pnl30 += ((m30 * static_cast<double>(ord.price)) / 1'000'000.0) * scale;
                 }
                 if (ord.l3_filled) {
                     b_ref_fills++;
+                    b_l3_pnl5 += ((ord.l3_markout_5s_bps * static_cast<double>(ord.price)) / 1'000'000.0) * scale;
                 }
                 if (ord.touch_filled && ord.l3_filled) {
                     double lead_ms = (static_cast<double>(ord.l3_fill_ts) - static_cast<double>(ord.touch_fill_ts)) / 1e6;
@@ -617,7 +627,11 @@ inline FillModelSummary evaluate_model_performance(
                 bs_m1.push_back(b_sum_m1 / b_fills);
                 bs_m5.push_back(b_sum_m5 / b_fills);
                 bs_m30.push_back(b_sum_m30 / b_fills);
+                bs_pnl_5s.push_back(b_sum_pnl5);
                 bs_pnl_30s.push_back(b_sum_pnl30);
+            }
+            if (is_touch_model && b_l3_pnl5 > 0.0 && b_sum_pnl5 > 0.0) {
+                bs_pnl_ratios.push_back(b_sum_pnl5 / b_l3_pnl5);
             }
         }
     }
@@ -643,7 +657,13 @@ inline FillModelSummary evaluate_model_performance(
     summary.markout_1s_ci = compute_bootstrap_ci(bs_m1, point_m1);
     summary.markout_5s_ci = compute_bootstrap_ci(bs_m5, point_m5);
     summary.markout_30s_ci = compute_bootstrap_ci(bs_m30, point_m30);
+    summary.pnl_5s_usd_ci = compute_bootstrap_ci(bs_pnl_5s, summary.total_pnl_5s_usd);
     summary.pnl_30s_usd_ci = compute_bootstrap_ci(bs_pnl_30s, summary.total_pnl_30s_usd);
+
+    if (is_touch_model && !bs_pnl_ratios.empty()) {
+        double pt_ratio = bs_pnl_ratios.front();
+        summary.pnl_ratio_5s_ci = compute_bootstrap_ci(bs_pnl_ratios, pt_ratio);
+    }
 
     return summary;
 }

@@ -4,17 +4,21 @@
 
 ---
 
-## 1. Measurement Methodology & Environmental Controls
+## 1. Measurement Methodology & Tool Attribution
 
 In strict accordance with the project's **"measured numbers only"** rule:
-- All figures represent direct empirical measurements from reproducible benchmark runners (`bench_stage2`, `differential_runner`, `arena_runner`).
+- All figures represent direct empirical measurements from reproducible benchmark runners (`l3_benchmarks`, `bench_stage2`, `arena_runner`).
 - No synthetic single-operation microbenchmarks are reported as resume or production throughput claims.
 - Timing is performed on mains power after a full warm-up pass.
+
+### Benchmark Tool Attribution (Which Tool Measures What)
+- **Google Benchmark (`l3_benchmarks`):** Measures macro replay throughput, median, and spread across 10 repetitions using `--benchmark_enable_random_interleaving=true` to prevent thermal throttling bias. Results are persisted to [`benchmarks/results/apple_m1.json`](benchmarks/results/apple_m1.json).
+- **Custom Harness (`bench_stage2`):** Measures sub-microsecond batch latency distributions (mean, p50, p90, p99, p99.9) and per-operation structural tail attribution, which Google Benchmark does not calculate.
 
 ### Hardware & Software Environment
 | Attribute | Specification |
 | :--- | :--- |
-| **System Architecture** | Apple Silicon (arm64, Apple M-series) |
+| **CPU Model** | Apple M1 (8 cores: 4 performance @ 3.2 GHz + 4 efficiency @ 2.06 GHz) |
 | **L1 Data Cache** | 64 KiB per core |
 | **L1 Instruction Cache**| 128 KiB per core |
 | **L2 Unified Cache** | 4,096 KiB |
@@ -26,24 +30,19 @@ In strict accordance with the project's **"measured numbers only"** rule:
 
 ---
 
-## 2. Component-Separated Throughput (MMAP Replay)
+## 2. Google Benchmark In-Memory Replay Results
 
-To eliminate disk I/O and gzip streaming decompression overhead from engine timing, the full-day ITCH fixture (`4,115,178` messages) was memory-mapped (`mmap` with `posix_madvise(MADV_WILLNEED)`). Three pipeline stages were benchmarked across **10 repeated runs**:
+The full-day ITCH fixture (`4,115,178` messages) was memory-mapped (`mmap` with `posix_madvise(MADV_WILLNEED)`). Google Benchmark executed 10 repetitions with random interleaving (`--benchmark_enable_random_interleaving=true`) so that thermal throttling and background system load affect both engines symmetrically.
 
-### Table 1: In-Memory Pipeline Throughput (4,115,178 ITCH Messages, 10 Runs)
-| Pipeline Component | Median (ms) | Min (ms) | Max (ms) | Throughput (M msg/s) | Latency (ns/msg) |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Decode Only** *(wire framing + field extraction)* | 34.99 | 32.33 | 55.38 | **117.61** | ~8.50 |
-| **Decode + Arena OrderBook** | 358.00 | 281.47 | 584.06 | **11.49** | ~87.00 |
-| **Decode + Reference OrderBook** (`std::map`) | 975.48 | 667.32 | 2220.71 | **4.22** | ~237.04 |
+### Table 1: Standardized Google Benchmark Replay (4,115,178 Messages, 10 Interleaved Runs)
+*Source: [`benchmarks/results/apple_m1.json`](benchmarks/results/apple_m1.json)*
+| Replay Benchmark | Median Time (ms) | Mean Time (ms) | StdDev (ms) | Throughput (Median) |
+| :--- | :---: | :---: | :---: | :---: |
+| **`BM_ArenaBook_ReplayMmap`** | **211.84 ms** | 213.88 ms | 6.74 ms (CV: 3.15%) | **19.43M msg/s** (51.5 ns/msg) |
+| **`BM_ReferenceBook_ReplayMmap`** (`std::map`) | **469.01 ms** | 474.39 ms | 15.14 ms (CV: 3.19%) | **8.77M msg/s** (114.0 ns/msg) |
 
-### Isolated Book Mutation Speedup
-Subtracting the 34.99 ms decode baseline isolates the pure order book logic:
-- **Arena Book Only:** **323.01 ms** (**12.74M messages/s**, **78.5 ns/msg**)
-- **Reference Book Only:** **940.49 ms** (**4.38M messages/s**, **228.5 ns/msg**)
-- **Isolated Engine Speedup:** **2.91×**
-- **Total In-Memory Replay Speedup:** **2.72×**
-- *(Compare with End-to-End Replay Speedup including gzip decompression: **1.70×**)*
+- **Google Benchmark Replay Speedup:** **2.21× speedup** (median-to-median).
+- **Zero Allocations:** Memory pools were cleared/reset outside the timed region (`state.PauseTiming()` / `state.ResumeTiming()`).
 
 ---
 
@@ -63,15 +62,15 @@ Across all 4,115,178 messages, exactly **0 heap allocations** occurred during re
 
 ---
 
-## 4. Latency Distribution & Timer Resolution
+## 4. Latency Distribution & Timer Resolution (Custom Harness)
 
 ### Apple Silicon Timer Quantization & Pure Batch Timing
-The Apple Silicon hardware timer counter ticks at **24 MHz** (one tick every **41.67 ns**). Because an individual order book update executes in ~40–80 ns, single-message timestamping is subject to discrete timer tick quantization (e.g. 0 ns, 41.7 ns, 83.3 ns). Furthermore, calling `high_resolution_clock::now()` inside a per-message loop introduces ~20–25 ns of instrumentation overhead that pollutes batch timings.
+The Apple Silicon hardware timer ticks at **24 MHz** (one tick every **41.67 ns**). Because an individual order book update executes in ~40–80 ns, single-message timestamping is subject to discrete timer tick quantization (e.g. 0 ns, 41.7 ns, 83.3 ns). Furthermore, calling `high_resolution_clock::now()` inside a per-message loop introduces ~20–25 ns of instrumentation overhead that pollutes batch timings.
 
 To prevent this, pure batch timing was measured in isolated batches of **64 messages** without any inner loop timers or vector appends:
 - **Sum of All Batch Durations:** 304.88 ms (reconciles with total replay time within OS scheduling jitter).
 - **Mean Latency per Message:** **74.1 ns / msg**
-- The distribution is properly right-skewed with median (67.7 ns) below the mean (74.1 ns).
+- The distribution is properly right-skewed with median (67.7 ns) strictly below the mean (74.1 ns).
 
 ### Table 2: Pure Batch Latency Distribution (`Batch time / 64`, 64,276 Batches, 4,113,664 Messages)
 | Metric | Latency (ns / message) | Explanation |
@@ -129,3 +128,16 @@ To verify memory safety and avoid capacity exhaustion under extreme market volat
 - **Capacity Expansion:** In accordance with the 3–4× margin safety requirement, `OrderNodePool` was configured to **131,072 nodes** (4 MB RAM per book), providing a **4.30× safety margin** over the highest empirical peak (30,483 orders on FOMC day).
 - **Hash Table Sizing:** `OrderIdMap` was sized to **262,144 slots** (power-of-2), maintaining peak load factors $\le 0.12$ and ensuring average probe lengths remain below 1.25.
 - Both days passed full-day differential parity testing against the `std::map` reference book with bit-for-bit identical FIFO queues across all snapshots.
+
+---
+
+## 7. Hardware Counters & Environment Constraints Note
+
+### Performance Counters on macOS vs. Linux
+- **Hardware Architecture:** Apple M1 (ARM64). On macOS, the kernel does not expose the hardware Performance Monitor Unit (PMU) through Linux `perf`-style interfaces.
+- **Virtualization Note:** In Docker containers on Apple Silicon, hypervisor virtualization blocks PMU events (e.g. `perf stat` returns `The cycles event is not supported`).
+- **Linux Bare-Metal Profiling Protocol:** On bare-metal Linux (or a cloud VM with PMU virtualization enabled), run:
+  ```bash
+  perf stat -e cycles,instructions,L1-dcache-load-misses,branch-misses ./build/arena_runner
+  ```
+  and divide the totals by 4,115,178 messages to obtain exact per-message cycles, IPC, L1 cache misses, and branch miss rates.
