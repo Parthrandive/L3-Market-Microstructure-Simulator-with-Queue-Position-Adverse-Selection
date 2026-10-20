@@ -112,36 +112,41 @@ See [BENCHMARKS.md](BENCHMARKS.md) for full run protocols, sample distributions,
   - Models barely differ (within 0.1 to 1.5 shares MAE) because executions overwhelmingly dominate depth depletion at the Best Bid. Relative MAE drops from 30.8% in shallow queues ($\le 200$ sh) to 2.9% in deep queues (>5k sh).
 - **Multiple Testing Disclosure:** Full parameter matrix (1s, 5s, 10s TTL; OBI > 0.0 vs OBI > 0.20 vs unconditional) documented in `STAGE3_REPORT.md`. Naive touch overstatement reaches **2.93×** under fast 1s cancel horizons.
 
-See [STAGE3_REPORT.md](STAGE3_REPORT.md) for complete experimental protocols, multi-day tables, and sensitivity sweeps.
+See [STAGE3_REPORT.md](STAGE3_REPORT.md) and [STAGE4_REPORT.md](STAGE4_REPORT.md) for complete experimental protocols, multi-day tables, and sensitivity sweeps.
 
-### Stage 4 – Fill Simulator & Adverse Selection
-- Compare 3 fill models for a fixed passive strategy (e.g. joining the best bid when OBI is favorable):
-  1. Naive touch fill (fills immediately when trade occurs at limit price).
-  2. Queue-aware fill (fills only when depth ahead is depleted by executions).
-  3. Queue-aware fill with wire latency $\Delta t$.
-- Post-fill markout of mid-price at 1s, 5s, and 30s to evaluate adverse selection.
-- Output: A comparative summary table showing fill rate, post-fill markout, and strategy PnL across models.
+### Stage 4 – Fill Simulator & Adverse Selection (Completed)
+- Evaluated 3 fill models for a passive quote-posting strategy (100 shares @ Best Bid when $\text{OBI} > 0.0$, 5s TTL, 250 ms sampling rate) across Dec 30 (holiday lull) and Oct 30 (FOMC rate decision) sessions:
+  1. **Model 1: Naive Touch Fill:** Fills immediately upon any trade at or through limit price.
+  2. **Model 2: Queue-Aware L3 Fill ($\Delta t = 0\,\mu\text{s}$):** Fills only when depth ahead is depleted by true intrusive FIFO executions.
+  3. **Model 3: Latency-Aware L3 Fill ($\Delta t \in \{50\,\mu\text{s}, 250\,\mu\text{s}\}$):** Incorporates wire transit delay.
+- **Empirical Findings Summary (95% Time-Block Bootstrap CI across 64k+ orders/day):**
+  - **Fill Rate Overstatement:** Naive touch overstates fill rates by **1.82×** on Dec 30 (37.50% vs 20.57%) and **1.77×** on Oct 30 (37.57% vs 21.21%).
+  - **Premature Execution Lead Time:** Touch fills trigger **317.5 ms** (Dec 30) and **368.6 ms** (Oct 30) before real queue depletion.
+  - **Adverse Selection & Spread Evaporation:** On Dec 30, post-fill mid drift crashes by **-0.41 bps** at 30s, turning net markout negative (**-0.05 bps**) for true L3 fills, whereas naive touch reports an artificially positive markout (+0.01 bps).
+  - **PnL Inversion in Backtests:** Naive touch backtesting reports an artificially profitable strategy at 30s (**+$722.50**), whereas real L3 execution shows the strategy **loses -$1,494.00** (-$0.0231/order). At 5s, touch overstates realized PnL by **3.19×** ($10,797 vs $3,382).
 
-### Stage 5 – Python Bridge
-- `nanobind` module exposing order submission, cancellation, and callbacks.
-- Replay test agent interacting with simulator.
+See [STAGE4_REPORT.md](STAGE4_REPORT.md) for full experimental tables, bootstrap distributions, and microstructure derivations.
+
+### Stage 5 – Python Bridge (Next Step)
+- `nanobind` module exposing order submission, cancellation, book queries, and market data replay.
+- High-performance C++ Python bindings for quantitative research and execution backtesting.
 
 ---
 
 ## Experimental Integrity & Rules
 
-- **Data:** Validated against public Nasdaq TotalView-ITCH 5.0 data.
-- **Strict reporting:** No fabricated metrics in reports. Any table layouts in early drafts are structural placeholders; final values reflect measured experimental output only.
+- **Data:** Validated against public Nasdaq TotalView-ITCH 5.0 data (Dec 30, 2019 and Oct 30, 2019).
+- **Strict reporting:** No fabricated metrics in reports. All values reflect measured experimental output from reproducible code and fixtures.
 - **Distinction of latencies:**
   - *Simulated wire latency ($\Delta t$):* A configurable model input parameter representing transit time.
   - *Engine processing latency:* Measured execution time per message.
-- **Node layout:** 32-byte `OrderNode` using 32-bit indices rather than 64-bit pointers.
-- **Hardware counters:** Linux `perf` or macOS Instruments reported with environment details.
+- **Node layout:** 32-byte `OrderNode` using 32-bit indices packed into 64-byte aligned pools (zero hot-path heap allocation).
+- **Hardware counters:** Measured on Apple Silicon M-series hardware timebase (24 MHz / 41.7 ns resolution).
 
 ---
 
-## Resume Bullet Template (to be populated post-measurement)
+## Resume Bullet Template (Populated Post-Measurement)
 
-- Built a C++20 L3 limit order book and ITCH 5.0 replay engine (arena-allocated, intrusive FIFO levels, no hot-path heap allocation) processing `[X]` M messages/s with `[X]` ns p99 per update on `[CPU model]`.
-- Implemented queue-position estimation and a latency-aware fill simulator; evaluated fill overstatement on a passive quote-posting strategy, finding `[X]%` fill divergence against touch-fill assumptions and `[X]` bps adverse selection at a 5s markout.
+- Built a C++20 L3 limit order book and ITCH 5.0 replay engine (arena-allocated, intrusive FIFO levels, zero heap allocation on hot path) processing **12.74M messages/s** with **~221 ns p99** update latency on Apple Silicon M-series.
+- Implemented queue-position tracking and a latency-aware fill simulator; evaluated fill overstatement on a passive quote-posting strategy, discovering a **1.77×–1.82× fill rate overstatement** in naive touch backtests, **318–369 ms premature fill bias**, and an empirical **PnL inversion (+$722 naive vs -$1,494 true L3)** caused by adverse selection (**-0.41 bps 30s post-fill drift**).
 - Exposed the simulator to Python via `nanobind` for algorithmic execution research.

@@ -117,6 +117,19 @@ target_compile_options(queue_simulator PRIVATE
     -Wall -Wextra -Werror -pedantic
 )
 
+# Stage 4 Fill Simulator & Adverse Selection
+add_executable(fill_simulator
+    src/fill_simulator.cpp
+)
+
+target_link_libraries(fill_simulator PRIVATE
+    l3_orderbook
+)
+
+target_compile_options(fill_simulator PRIVATE
+    -Wall -Wextra -Werror -pedantic
+)
+
 # External dependencies via FetchContent
 include(FetchContent)
 
@@ -136,6 +149,7 @@ if(BUILD_TESTS)
         tests/test_parser_and_reference.cpp
         tests/test_order_book.cpp
         tests/test_stage3_queue.cpp
+        tests/test_stage4_fill_simulator.cpp
     )
 
     target_link_libraries(l3_tests PRIVATE
