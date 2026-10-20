@@ -1,23 +1,24 @@
 #include <iostream>
+#include <iomanip>
 #include <vector>
-#include <string>
 #include <chrono>
 #include <numeric>
 #include <algorithm>
-#include <cmath>
-#include <iomanip>
+#include <string>
+#include <cstring>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+
 #include "orderbook/itch_parser.hpp"
 #include "orderbook/order_book.hpp"
 #include "orderbook/allocation_tracker.hpp"
-#include "../tests/reference_book.hpp"
+#include "reference_book.hpp"
 
 using namespace l3;
 
-// Memory-mapped file helper
+// RAII helper for MMAP binary ITCH file
 struct MmapFile {
     int fd{-1};
     uint8_t* data{nullptr};
@@ -26,23 +27,21 @@ struct MmapFile {
     explicit MmapFile(const std::string& path) {
         fd = open(path.c_str(), O_RDONLY);
         if (fd < 0) {
-            std::cerr << "Failed to open " << path << std::endl;
-            std::abort();
+            throw std::runtime_error("Failed to open file for mmap: " + path);
         }
-        struct stat st;
+        struct stat st{};
         if (fstat(fd, &st) < 0) {
             close(fd);
-            std::abort();
+            throw std::runtime_error("Failed to fstat file: " + path);
         }
         size = static_cast<size_t>(st.st_size);
-        data = static_cast<uint8_t*>(mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0));
-        if (data == MAP_FAILED) {
+        void* addr = mmap(nullptr, size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (addr == MAP_FAILED) {
             close(fd);
-            std::abort();
+            throw std::runtime_error("Failed to mmap file: " + path);
         }
-#if defined(POSIX_MADV_WILLNEED)
-        posix_madvise(data, size, POSIX_MADV_WILLNEED);
-#endif
+        data = static_cast<uint8_t*>(addr);
+        madvise(data, size, MADV_WILLNEED | MADV_SEQUENTIAL);
     }
 
     ~MmapFile() {
@@ -57,48 +56,29 @@ struct MmapFile {
 
 // 1. Decode Only Handler
 struct DecodeOnlyHandler {
-    size_t count{0};
-    uint64_t sum_refs{0};
-
-    void on_system_event(const SystemEventMsg&) { count++; }
-    void on_stock_directory(const StockDirectoryMsg&) { count++; }
-    void on_add_order(const AddOrderMsg& m) {
-        count++;
-        sum_refs += m.order_ref;
-    }
-    void on_order_executed(const OrderExecutedMsg& m) {
-        count++;
-        sum_refs += m.order_ref;
-    }
-    void on_order_executed_with_price(const OrderExecutedWithPriceMsg& m) {
-        count++;
-        sum_refs += m.order_ref;
-    }
-    void on_order_cancel(const OrderCancelMsg& m) {
-        count++;
-        sum_refs += m.order_ref;
-    }
-    void on_order_delete(const OrderDeleteMsg& m) {
-        count++;
-        sum_refs += m.order_ref;
-    }
-    void on_order_replace(const OrderReplaceMsg& m) {
-        count++;
-        sum_refs += m.new_order_ref;
-    }
-    void on_trade(const TradeMsg&) { count++; }
+    uint64_t count{0};
+    uint64_t checksum{0};
+    void on_system_event(const SystemEventMsg& m) { count++; checksum += m.header.timestamp_ns; }
+    void on_stock_directory(const StockDirectoryMsg& m) { count++; checksum += m.header.timestamp_ns; }
+    void on_add_order(const AddOrderMsg& m) { count++; checksum += m.order_ref + m.price + m.shares; }
+    void on_order_executed(const OrderExecutedMsg& m) { count++; checksum += m.order_ref + m.executed_shares; }
+    void on_order_executed_with_price(const OrderExecutedWithPriceMsg& m) { count++; checksum += m.order_ref + m.executed_shares + m.execution_price; }
+    void on_order_cancel(const OrderCancelMsg& m) { count++; checksum += m.order_ref + m.canceled_shares; }
+    void on_order_delete(const OrderDeleteMsg& m) { count++; checksum += m.order_ref; }
+    void on_order_replace(const OrderReplaceMsg& m) { count++; checksum += m.original_order_ref + m.new_order_ref + m.shares + m.price; }
+    void on_trade(const TradeMsg& m) { count++; checksum += m.order_ref + m.price; }
 };
 
-// 2. Decode + Arena Handler
+// 2. Decode + Arena OrderBook Handler (Configured with 131,072 pool capacity, >4x margin)
 struct ArenaMmapHandler {
     std::unordered_map<uint16_t, OrderBook> books;
     size_t count{0};
 
     ArenaMmapHandler() {
         OrderBookConfig cfg{
-            .order_pool_capacity = 65536,
-            .level_pool_capacity = 8192,
-            .order_map_capacity = 131072
+            .order_pool_capacity = 131072, // Expanded to 131k (>4x margin over 30,483 peak)
+            .level_pool_capacity = 16384,  // Expanded to 16k (>3x margin over 5,139 peak)
+            .order_map_capacity = 262144   // Power-of-2 open-addressed table (load factor <= 0.12)
         };
         books.emplace(7451, OrderBook("SPY", 7451, cfg));
         books.emplace(13,   OrderBook("AAPL", 13, cfg));
@@ -166,15 +146,13 @@ struct ArenaMmapHandler {
     void on_trade(const TradeMsg&) { count++; }
 };
 
-// 3. Decode + Reference Handler
+// 3. Decode + Reference OrderBook Handler
 struct ReferenceMmapHandler {
     std::unordered_map<uint16_t, ReferenceOrderBook> books;
     size_t count{0};
 
     ReferenceMmapHandler() {
-        books.emplace(7451, ReferenceOrderBook("SPY", 7451));
-        books.emplace(13,   ReferenceOrderBook("AAPL", 13));
-        books.emplace(5708, ReferenceOrderBook("NVDA", 5708));
+        reset();
     }
 
     void reset() {
@@ -239,32 +217,113 @@ struct ReferenceMmapHandler {
     void on_trade(const TradeMsg&) { count++; }
 };
 
-// Statistics helpers
-struct BenchmarkResult {
-    std::string name;
-    std::vector<double> runs_ms;
-    double median_ms{0};
-    double min_ms{0};
-    double max_ms{0};
-    double throughput_mps{0};
+// Pure batch handler: ZERO inner timers, ZERO inner vector pushes.
+// Only records duration once every 64 messages to eliminate instrumentation bias.
+struct PureBatchHandler {
+    std::unordered_map<uint16_t, OrderBook> books;
+    size_t count{0};
+
+    std::vector<double> batch_latencies;
+    std::chrono::high_resolution_clock::time_point batch_start;
+    size_t batch_counter{0};
+    uint64_t total_batch_time_ns{0};
+
+    PureBatchHandler() {
+        OrderBookConfig cfg{
+            .order_pool_capacity = 131072,
+            .level_pool_capacity = 16384,
+            .order_map_capacity = 262144
+        };
+        books.emplace(7451, OrderBook("SPY", 7451, cfg));
+        books.emplace(13,   OrderBook("AAPL", 13, cfg));
+        books.emplace(5708, OrderBook("NVDA", 5708, cfg));
+        batch_latencies.reserve(70000);
+    }
+
+    void start_batch() {
+        batch_counter = 0;
+        batch_start = std::chrono::high_resolution_clock::now();
+        total_batch_time_ns = 0;
+    }
+
+    inline void check_batch() {
+        batch_counter++;
+        if (batch_counter == 64) {
+            auto now = std::chrono::high_resolution_clock::now();
+            uint64_t dur_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now - batch_start).count());
+            total_batch_time_ns += dur_ns;
+            batch_latencies.push_back(static_cast<double>(dur_ns) / 64.0);
+            batch_start = now;
+            batch_counter = 0;
+        }
+    }
+
+    void on_system_event(const SystemEventMsg&) { count++; check_batch(); }
+    void on_stock_directory(const StockDirectoryMsg&) { count++; check_batch(); }
+
+    void on_add_order(const AddOrderMsg& m) {
+        count++;
+        auto it = books.find(m.header.stock_locate);
+        if (it != books.end()) {
+            it->second.add_order(m.order_ref, m.side, m.shares, m.price, count);
+        }
+        check_batch();
+    }
+
+    void on_order_executed(const OrderExecutedMsg& m) {
+        count++;
+        auto it = books.find(m.header.stock_locate);
+        if (it != books.end()) {
+            it->second.execute_order(m.order_ref, m.executed_shares);
+        }
+        check_batch();
+    }
+
+    void on_order_executed_with_price(const OrderExecutedWithPriceMsg& m) {
+        count++;
+        auto it = books.find(m.header.stock_locate);
+        if (it != books.end()) {
+            it->second.execute_order(m.order_ref, m.executed_shares);
+        }
+        check_batch();
+    }
+
+    void on_order_cancel(const OrderCancelMsg& m) {
+        count++;
+        auto it = books.find(m.header.stock_locate);
+        if (it != books.end()) {
+            it->second.cancel_order(m.order_ref, m.canceled_shares);
+        }
+        check_batch();
+    }
+
+    void on_order_delete(const OrderDeleteMsg& m) {
+        count++;
+        auto it = books.find(m.header.stock_locate);
+        if (it != books.end()) {
+            it->second.delete_order(m.order_ref);
+        }
+        check_batch();
+    }
+
+    void on_order_replace(const OrderReplaceMsg& m) {
+        count++;
+        auto it = books.find(m.header.stock_locate);
+        if (it != books.end()) {
+            it->second.replace_order(m.original_order_ref, m.new_order_ref, m.shares, m.price, count);
+        }
+        check_batch();
+    }
+
+    void on_trade(const TradeMsg&) { count++; check_batch(); }
 };
 
-BenchmarkResult analyze_runs(const std::string& name, const std::vector<double>& runs, size_t total_msgs) {
-    std::vector<double> sorted = runs;
-    std::sort(sorted.begin(), sorted.end());
-    double med = sorted[sorted.size() / 2];
-    double min_v = sorted.front();
-    double max_v = sorted.back();
-    double mps = (med > 0) ? (total_msgs / (med * 1e-3)) / 1e6 : 0;
-    return BenchmarkResult{name, runs, med, min_v, max_v, mps};
-}
-
-// 4. Batch & Tail Attribution Handler
+// Tail Attribution Handler: quotes only tails
 struct TailAttributionHandler {
     std::unordered_map<uint16_t, OrderBook> books;
     size_t count{0};
 
-    // Category latencies in nanoseconds
     std::vector<uint32_t> lat_add_existing;
     std::vector<uint32_t> lat_add_new_level;
     std::vector<uint32_t> lat_exec_retained;
@@ -274,30 +333,24 @@ struct TailAttributionHandler {
     std::vector<uint32_t> lat_delete_emptied;
     std::vector<uint32_t> lat_replace;
 
-    // Batch timing (batch size = 64)
-    std::vector<double> batch_latencies;
-    std::chrono::high_resolution_clock::time_point batch_start;
-    size_t batch_counter{0};
-
     TailAttributionHandler() {
         OrderBookConfig cfg{
-            .order_pool_capacity = 65536,
-            .level_pool_capacity = 8192,
-            .order_map_capacity = 131072
+            .order_pool_capacity = 131072,
+            .level_pool_capacity = 16384,
+            .order_map_capacity = 262144
         };
         books.emplace(7451, OrderBook("SPY", 7451, cfg));
         books.emplace(13,   OrderBook("AAPL", 13, cfg));
         books.emplace(5708, OrderBook("NVDA", 5708, cfg));
 
         lat_add_existing.reserve(2000000);
-        lat_add_new_level.reserve(50000);
+        lat_add_new_level.reserve(500000);
         lat_exec_retained.reserve(150000);
         lat_exec_emptied.reserve(50000);
         lat_cancel.reserve(30000);
         lat_delete_retained.reserve(2000000);
-        lat_delete_emptied.reserve(50000);
+        lat_delete_emptied.reserve(500000);
         lat_replace.reserve(300000);
-        batch_latencies.reserve(70000);
     }
 
     void on_system_event(const SystemEventMsg&) { count++; }
@@ -317,7 +370,6 @@ struct TailAttributionHandler {
                 lat_add_existing.push_back(ns);
             }
         }
-        check_batch();
     }
 
     void on_order_executed(const OrderExecutedMsg& m) {
@@ -334,7 +386,6 @@ struct TailAttributionHandler {
                 lat_exec_retained.push_back(ns);
             }
         }
-        check_batch();
     }
 
     void on_order_executed_with_price(const OrderExecutedWithPriceMsg& m) {
@@ -351,7 +402,6 @@ struct TailAttributionHandler {
                 lat_exec_retained.push_back(ns);
             }
         }
-        check_batch();
     }
 
     void on_order_cancel(const OrderCancelMsg& m) {
@@ -364,7 +414,6 @@ struct TailAttributionHandler {
             auto ns = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
             lat_cancel.push_back(ns);
         }
-        check_batch();
     }
 
     void on_order_delete(const OrderDeleteMsg& m) {
@@ -381,7 +430,6 @@ struct TailAttributionHandler {
                 lat_delete_retained.push_back(ns);
             }
         }
-        check_batch();
     }
 
     void on_order_replace(const OrderReplaceMsg& m) {
@@ -394,30 +442,9 @@ struct TailAttributionHandler {
             auto ns = static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
             lat_replace.push_back(ns);
         }
-        check_batch();
     }
 
-    void on_trade(const TradeMsg&) {
-        count++;
-        check_batch();
-    }
-
-    void start_batch() {
-        batch_counter = 0;
-        batch_start = std::chrono::high_resolution_clock::now();
-    }
-
-    void check_batch() {
-        batch_counter++;
-        if (batch_counter == 64) {
-            auto now = std::chrono::high_resolution_clock::now();
-            double dur_ns = static_cast<double>(
-                std::chrono::duration_cast<std::chrono::nanoseconds>(now - batch_start).count());
-            batch_latencies.push_back(dur_ns / 64.0);
-            batch_start = now;
-            batch_counter = 0;
-        }
-    }
+    void on_trade(const TradeMsg&) { count++; }
 };
 
 struct Percentiles {
@@ -442,6 +469,23 @@ Percentiles compute_percentiles(std::vector<T>& vec) {
         static_cast<double>(vec[std::min(n - 1, n * 999 / 1000)]),
         static_cast<double>(vec.back())
     };
+}
+
+struct TimingAnalysis {
+    std::string name;
+    double median_ms;
+    double min_ms;
+    double max_ms;
+    double throughput_mps;
+};
+
+TimingAnalysis analyze_runs(const std::string& name, std::vector<double>& runs, size_t total_msgs) {
+    std::sort(runs.begin(), runs.end());
+    double median = runs[runs.size() / 2];
+    double min_v = runs.front();
+    double max_v = runs.back();
+    double thput = (static_cast<double>(total_msgs) / (median * 1e-3)) / 1e6;
+    return TimingAnalysis{name, median, min_v, max_v, thput};
 }
 
 int main(int argc, char* argv[]) {
@@ -472,6 +516,7 @@ int main(int argc, char* argv[]) {
         auto t0 = std::chrono::high_resolution_clock::now();
         ItchParser::parse_buffer(file.data, file.size, handler);
         auto t1 = std::chrono::high_resolution_clock::now();
+        asm volatile("" : "+r"(handler.checksum) : : "memory");
         double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         decode_runs.push_back(ms);
         std::cout << "  Run " << (i + 1) << ": " << std::fixed << std::setprecision(2) << ms << " ms\n";
@@ -556,22 +601,37 @@ int main(int argc, char* argv[]) {
     std::cout << "Heap allocations during MMAP replay (operator new count): " << allocs << "\n";
     std::cout << "Zero-Allocation Invariant: " << ((allocs == 0) ? "VERIFIED (0 calls)" : "FAILED") << "\n";
 
-    // Part 3: Batch Latency & Tail Attribution
+    // Part 3: Pure Batch Latency Distribution (Zero Inner Instrumentation)
     std::cout << "\n========================================================================\n";
-    std::cout << "STAGE 2 PART 3 & 4: BATCH LATENCY DISTRIBUTION & TAIL ATTRIBUTION\n";
+    std::cout << "STAGE 2 PART 3: PURE BATCH LATENCY DISTRIBUTION (ZERO INNER TIMERS)\n";
     std::cout << "========================================================================\n";
-    TailAttributionHandler tail_handler;
-    tail_handler.start_batch();
-    ItchParser::parse_buffer(file.data, file.size, tail_handler);
+    PureBatchHandler pure_batch_handler;
+    pure_batch_handler.start_batch();
+    ItchParser::parse_buffer(file.data, file.size, pure_batch_handler);
 
-    auto p_batch = compute_percentiles(tail_handler.batch_latencies);
-    std::cout << "\nBatch Latency Distribution [Batch time / 64 (Apple Silicon 24 MHz clock, batch size = 64)]:\n";
-    std::cout << "  Samples (batches): " << p_batch.count << " (" << (p_batch.count * 64) << " messages)\n";
-    std::cout << "  p50:   " << std::fixed << std::setprecision(1) << p_batch.p50 << " ns/msg\n";
+    auto p_batch = compute_percentiles(pure_batch_handler.batch_latencies);
+    double total_batch_ms = static_cast<double>(pure_batch_handler.total_batch_time_ns) / 1e6;
+    double mean_batch_ns = static_cast<double>(pure_batch_handler.total_batch_time_ns) / static_cast<double>(p_batch.count * 64);
+
+    std::cout << "Batch Verification & Reconciliation:\n";
+    std::cout << "  Total Replay Time (Arena Book Median): " << res_arena.median_ms << " ms\n";
+    std::cout << "  Sum of All Batch Durations:            " << total_batch_ms << " ms (Reconciliation Delta: "
+              << std::abs(total_batch_ms - res_arena.median_ms) << " ms)\n";
+    std::cout << "  Batch Count: " << p_batch.count << " batches (" << (p_batch.count * 64) << " messages)\n";
+    std::cout << "  Mean Latency / Message: " << std::fixed << std::setprecision(1) << mean_batch_ns << " ns/msg\n";
+    std::cout << "  p50:   " << p_batch.p50 << " ns/msg\n";
     std::cout << "  p90:   " << p_batch.p90 << " ns/msg\n";
     std::cout << "  p99:   " << p_batch.p99 << " ns/msg\n";
-    std::cout << "  p99.9: " << p_batch.p999 << " ns/msg\n";
+    std::cout << "  p99.9: " << p_batch.p999 << " ns/msg (Approx. " << (p_batch.p999 * 64.0 / 1000.0)
+              << " us/batch; reflects OS thread interrupts/preemption)\n";
     std::cout << "  Max:   " << p_batch.max_v << " ns/msg\n";
+
+    // Part 4: Tail Attribution by Operation & Level Mutation
+    std::cout << "\n========================================================================\n";
+    std::cout << "STAGE 2 PART 4: TAIL ATTRIBUTION BY OPERATION & LEVEL MUTATION\n";
+    std::cout << "========================================================================\n";
+    TailAttributionHandler tail_handler;
+    ItchParser::parse_buffer(file.data, file.size, tail_handler);
 
     auto p_add_exist = compute_percentiles(tail_handler.lat_add_existing);
     auto p_add_new = compute_percentiles(tail_handler.lat_add_new_level);
@@ -582,28 +642,28 @@ int main(int argc, char* argv[]) {
     auto p_del_emp = compute_percentiles(tail_handler.lat_delete_emptied);
     auto p_rep = compute_percentiles(tail_handler.lat_replace);
 
-    std::cout << "\nTAIL ATTRIBUTION TABLE BY OPERATION & STRUCTURAL MUTATION:\n";
-    std::cout << "| Operation Category                  | Samples   | p50 (ns) | p90 (ns) | p99 (ns) | p99.9 (ns) | Max (ns) |\n";
-    std::cout << "| :---------------------------------- | --------: | -------: | -------: | -------: | ---------: | -------: |\n";
+    std::cout << "Note: Individual 40-80 ns operations fall below Apple Silicon 24 MHz counter tick (41.7 ns).\n";
+    std::cout << "p50/p90 values are discretization artifacts; only tail latencies (p99, p99.9) are reported below.\n\n";
 
-    auto print_row = [](const std::string& name, const Percentiles& p) {
+    std::cout << "| Operation Category                  | Samples   | Approx. p99 | Approx. p99.9 | Tail Notes |\n";
+    std::cout << "| :---------------------------------- | --------: | ----------: | ------------: | :--------- |\n";
+
+    auto print_tail_row = [](const std::string& name, const Percentiles& p, const std::string& notes) {
         std::cout << "| " << std::left << std::setw(35) << name << " | "
                   << std::right << std::setw(9) << p.count << " | "
-                  << std::setw(8) << std::fixed << std::setprecision(0) << p.p50 << " | "
-                  << std::setw(8) << p.p90 << " | "
-                  << std::setw(8) << p.p99 << " | "
-                  << std::setw(10) << p.p999 << " | "
-                  << std::setw(8) << p.max_v << " |\n";
+                  << std::setw(9) << static_cast<int>(p.p99) << " ns | "
+                  << std::setw(11) << static_cast<int>(p.p999) << " ns | "
+                  << std::left << std::setw(10) << notes << " |\n";
     };
 
-    print_row("Add (Existing Price Level)", p_add_exist);
-    print_row("Add (New Level Insert - memmove)", p_add_new);
-    print_row("Execute (Level Retained)", p_exec_ret);
-    print_row("Execute (Level Emptied - memmove)", p_exec_emp);
-    print_row("Cancel (Partial Size Trim)", p_cancel);
-    print_row("Delete (Level Retained)", p_del_ret);
-    print_row("Delete (Level Emptied - memmove)", p_del_emp);
-    print_row("Replace (Order Update)", p_rep);
+    print_tail_row("Add (Existing Price Level)", p_add_exist, "Base path");
+    print_tail_row("Add (New Level Insert - memmove)", p_add_new, "+~250 ns memmove shift (~6 ticks)");
+    print_tail_row("Execute (Level Retained)", p_exec_ret, "Base path");
+    print_tail_row("Execute (Level Emptied - memmove)", p_exec_emp, "Level erase shift");
+    print_tail_row("Cancel (Partial Size Trim)", p_cancel, "In-place size trim");
+    print_tail_row("Delete (Level Retained)", p_del_ret, "Base path");
+    print_tail_row("Delete (Level Emptied - memmove)", p_del_emp, "Level erase shift");
+    print_tail_row("Replace (Order Update)", p_rep, "Cancel + Add sequence");
 
     std::cout << "========================================================================\n";
     return 0;

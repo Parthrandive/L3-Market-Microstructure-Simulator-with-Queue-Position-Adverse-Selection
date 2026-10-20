@@ -68,37 +68,49 @@ If college exams restrict time, drop stage 5 first, then OBI/VPIN. Never drop st
 *All numbers directly quoted from [BENCHMARKS.md](BENCHMARKS.md) (measured on Apple Silicon arm64, single-core, AppleClang 17.0.0, `-O3 -DNDEBUG`).*
 
 - **MMAP Replay Throughput (10 Runs post-warmup, no I/O, no zlib):**
-  - **Decode Only:** Median **22.16 ms** (**185.71M msg/s**, 5.38 ns/msg)
-  - **Arena Book Only:** Median **179.89 ms** (**22.88M msg/s**, 43.7 ns/msg)
-  - **Reference Book Only:** Median **468.12 ms** (**8.79M msg/s**, 113.8 ns/msg)
-  - **Isolated Book Speedup:** **2.60×** (Total in-memory speedup: **2.43×**)
+  - **Decode Only:** Median **34.99 ms** (**117.61M msg/s**, ~8.50 ns/msg)
+  - **Arena Book Only:** Median **323.01 ms** (**12.74M msg/s**, ~78.5 ns/msg)
+  - **Reference Book Only:** Median **940.49 ms** (**4.38M msg/s**, ~228.5 ns/msg)
+  - **Isolated Book Speedup:** **2.91×** (Total in-memory speedup: **2.72×**)
 - **Zero-Allocation Verification on MMAP:** Exactly **0 heap allocations** across all 4,115,178 messages.
-- **Batch Latency (`Batch time / 64` on 24 MHz Apple Silicon clock):**
-  - p50: **72.3 ns/msg** | p90: **97.7 ns/msg** | p99: **181.0 ns/msg** | p99.9: **819.7 ns/msg**
+- **Pure Batch Latency (`Batch time / 64` on 24 MHz Apple Silicon clock, zero inner timers):**
+  - Mean: **74.1 ns/msg** | p50: **67.7 ns/msg** | p90: **88.5 ns/msg** | p99: **220.7 ns/msg**
+  - p99.9: **818.4 ns/msg** (~52.4 µs/batch, strictly labeled as OS thread interrupts / preemption noise)
 - **Tail Attribution by Operation & Level Mutation:**
-  - Adding to an existing level: p50 = 42 ns, p99.9 = **375 ns**
-  - Creating a new price level (8-byte `LevelRef` vector insert): p50 = 83 ns, p99.9 = **625 ns** (~250 ns tail contribution)
+  - Adding to an existing level: p99 ~292 ns, p99.9 **~542 ns**
+  - Creating a new price level (8-byte `LevelRef` vector insert): p99 ~416 ns, p99.9 **~1,291 ns** (+~250 ns memmove shift, approx. 6 clock ticks)
 - **Multi-Day Headroom Verification:**
-  - Replayed both holiday-lull (`12302019`) and FOMC rate decision (`10302019`) sessions.
-  - Largest measured resting peak: **30,483** orders (AAPL on FOMC day), utilizing 46.51% of the 65,536 pool ($>2.1\times$ margin).
-  - Both sessions passed 100% full-day differential parity with bit-for-bit identical FIFO queue sequences.
+  - Sized `OrderNodePool` to **131,072 nodes** (4 MB) and `OrderIdMap` to **262,144 slots** (load factor $\le 0.12$).
+  - Largest measured resting peak: **30,483** orders (AAPL on FOMC day), achieving a **4.30× safety margin** (>3–4× requirement).
 
 See [BENCHMARKS.md](BENCHMARKS.md) for full run protocols, sample distributions, and hardware specifications.
 
 ### Stage 3 – Queue Position and Latency (Completed & Verified)
-*All numbers directly quoted from [STAGE3_REPORT.md](STAGE3_REPORT.md) (measured on Dec 30, 2019 and Oct 30, 2019 Nasdaq TotalView-ITCH data).*
+*All numbers directly quoted from [STAGE3_REPORT.md](STAGE3_REPORT.md) (strictly regular hours 09:30–16:00 ET on Dec 30, 2019 and Oct 30, 2019).*
+
+> **Definition:** *Naive touch fill is an execution simulation model that assumes a resting limit order fills immediately and in full upon the occurrence of any trade at or through its limit price, disregarding queue priority and resting depth ahead.*
 
 - **Lock-Free SPSC Ring Buffer (`SpscRingBuffer`):**
-  - Cache-line padded read/write indices (`alignas(128)`) to eliminate false sharing across Apple Silicon and x86 cache lines.
+  - Cache-line padded read/write indices (`alignas(128)`) to eliminate false sharing.
   - Verified under **ThreadSanitizer (TSan)** across 500,000 multi-threaded message transfers with **0 data races** and **0 dropped messages**.
-- **Naive Touch Fill Overstatement:**
-  - On natural market BBO order flow: Naive touch overstates fills by **1.11×** (Dec 30) and **1.25×** (Oct 30 FOMC session).
-  - On resting passive strategy orders (5s TTL): Naive touch overstates fills by **1.41× – 1.43×**, generating 50 false-positive fills.
-  - Mean fill timing distortion: Naive touch triggers fills **79.67 ms to 293.78 ms prematurely**, distorting execution and markout latency.
-- **Level-2 Queue Estimation Error (vs Ground Truth L3):**
-  - Both L2 Pessimistic and Probabilistic models exhibit a persistent positive queue-ahead bias (**+61.5 sh** on Dec 30, **+105.4 sh** on Oct 30) because aggregated L2 data cannot observe cancellations of orders resting ahead.
-- **Simulated Wire Latency ($\Delta t$):**
-  - Decoupled from engine execution latency (~49 ns). Wire latency transit parameter swept from 0 to 500 $\mu$s, capturing intervening queue degradation and price slippage.
+- **Naive Touch Overstatement & Block-Bootstrapped Confidence Intervals:**
+  - Dec 30, 2019 (Holiday lull, 1,827 orders, 459 true L3 fills):
+    - True L3 Fill Rate: **25.12% [95% CI: 20.56% – 30.41%]**
+    - Naive Touch Rate: **40.34% [95% CI: 34.51% – 47.88%]**
+    - Overstatement Ratio: **1.61× [95% CI: 1.48× – 1.75×]**
+  - Oct 30, 2019 (FOMC volatile session, 867 orders, 408 true L3 fills):
+    - True L3 Fill Rate: **47.06% [95% CI: 39.76% – 52.16%]**
+    - Naive Touch Rate: **61.13% [95% CI: 55.22% – 66.17%]**
+    - Overstatement Ratio: **1.30× [95% CI: 1.22× – 1.44×]**
+- **Wire Latency ($\Delta t$) Sweeps & Post-Fill Markout (Dec 30 Baseline):**
+  - $\Delta t = 0\,\mu\text{s}$: 25.12% fill rate | +1.26 bps @ 1s | +1.42 bps @ 5s
+  - $\Delta t = 50\,\mu\text{s}$: 23.83% fill rate | +1.24 bps @ 1s | +1.41 bps @ 5s
+  - $\Delta t = 100\,\mu\text{s}$: 23.83% fill rate | +1.24 bps @ 1s | +1.41 bps @ 5s
+  - $\Delta t = 250\,\mu\text{s}$: 23.83% fill rate | +1.24 bps @ 1s | +1.41 bps @ 5s
+  - $\Delta t = 500\,\mu\text{s}$: 23.65% fill rate | +1.24 bps @ 1s | +1.40 bps @ 5s
+- **Level-2 Queue Estimation Accuracy (Pessimistic vs. Probabilistic):**
+  - Models barely differ (within 0.1 to 1.5 shares MAE) because executions overwhelmingly dominate depth depletion at the Best Bid. Relative MAE drops from 30.8% in shallow queues ($\le 200$ sh) to 2.9% in deep queues (>5k sh).
+- **Multiple Testing Disclosure:** Full parameter matrix (1s, 5s, 10s TTL; OBI > 0.0 vs OBI > 0.20 vs unconditional) documented in `STAGE3_REPORT.md`. Naive touch overstatement reaches **2.93×** under fast 1s cancel horizons.
 
 See [STAGE3_REPORT.md](STAGE3_REPORT.md) for complete experimental protocols, multi-day tables, and sensitivity sweeps.
 

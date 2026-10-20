@@ -15,9 +15,9 @@
 namespace l3 {
 
 struct OrderBookConfig {
-    size_t order_pool_capacity{65536};     // Headroom for peak resting orders
-    size_t level_pool_capacity{8192};      // Headroom for peak distinct levels
-    size_t order_map_capacity{131072};     // Power-of-2 capacity for order-ID hash table
+    size_t order_pool_capacity{131072};    // Headroom for peak resting orders (>4x margin over 30,483 peak)
+    size_t level_pool_capacity{16384};     // Headroom for peak distinct levels (>3x margin over 5,139 peak)
+    size_t order_map_capacity{262144};     // Power-of-2 capacity for order-ID hash table (load factor <= 0.12)
 };
 
 enum class LevelMutation : uint8_t {
