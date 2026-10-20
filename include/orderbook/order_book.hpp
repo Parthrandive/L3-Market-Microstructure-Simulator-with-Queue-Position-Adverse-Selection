@@ -164,6 +164,59 @@ public:
     }
 
     // Book inspection queries
+    struct QueuePosition {
+        uint32_t shares_ahead{0};
+        uint32_t orders_ahead{0};
+        uint32_t level_total_shares{0};
+        uint32_t order_shares{0};
+        uint32_t price{0};
+        Side side{Side::Buy};
+        bool exists{false};
+    };
+
+    [[nodiscard]] QueuePosition get_queue_position(uint64_t order_ref) const noexcept {
+        uint32_t node_idx = order_map_.find(order_ref);
+        if (node_idx == NULL_INDEX) {
+            return QueuePosition{};
+        }
+
+        const OrderNode& node = order_pool_[node_idx];
+        const PriceLevel& level = level_pool_[node.level_idx];
+
+        uint32_t shares_ahead = 0;
+        uint32_t orders_ahead = 0;
+        uint32_t curr = node.prev_idx;
+        while (curr != NULL_INDEX) {
+            shares_ahead += order_pool_[curr].shares;
+            orders_ahead++;
+            curr = order_pool_[curr].prev_idx;
+        }
+
+        return QueuePosition{
+            .shares_ahead = shares_ahead,
+            .orders_ahead = orders_ahead,
+            .level_total_shares = level.total_shares,
+            .order_shares = node.shares,
+            .price = level.price,
+            .side = node.side,
+            .exists = true
+        };
+    }
+
+    [[nodiscard]] bool is_order_ahead(uint64_t candidate_ref, uint64_t target_ref) const noexcept {
+        uint32_t target_idx = order_map_.find(target_ref);
+        if (target_idx == NULL_INDEX) return false;
+        uint32_t cand_idx = order_map_.find(candidate_ref);
+        if (cand_idx == NULL_INDEX) return false;
+
+        uint32_t curr = order_pool_[target_idx].prev_idx;
+        while (curr != NULL_INDEX) {
+            if (curr == cand_idx) return true;
+            curr = order_pool_[curr].prev_idx;
+        }
+        return false;
+    }
+
     [[nodiscard]] std::optional<std::pair<uint32_t, uint32_t>> best_bid() const noexcept {
         uint32_t lvl_idx = bids_.best_level_idx();
         if (lvl_idx == NULL_INDEX) return std::nullopt;

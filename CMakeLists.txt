@@ -104,6 +104,19 @@ target_compile_options(arena_runner PRIVATE
     -Wall -Wextra -Werror -pedantic
 )
 
+# Stage 3 Queue Position and Wire Latency Simulator
+add_executable(queue_simulator
+    src/queue_simulator.cpp
+)
+
+target_link_libraries(queue_simulator PRIVATE
+    l3_orderbook
+)
+
+target_compile_options(queue_simulator PRIVATE
+    -Wall -Wextra -Werror -pedantic
+)
+
 # External dependencies via FetchContent
 include(FetchContent)
 
@@ -122,6 +135,7 @@ if(BUILD_TESTS)
         tests/test_main.cpp
         tests/test_parser_and_reference.cpp
         tests/test_order_book.cpp
+        tests/test_stage3_queue.cpp
     )
 
     target_link_libraries(l3_tests PRIVATE

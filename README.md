@@ -85,11 +85,22 @@ If college exams restrict time, drop stage 5 first, then OBI/VPIN. Never drop st
 
 See [BENCHMARKS.md](BENCHMARKS.md) for full run protocols, sample distributions, and hardware specifications.
 
-### Stage 3 – Queue Position and Latency
-- Lock-free SPSC ring buffer between the feed reader and the book thread, verified under TSan.
-- Two queue models: pessimistic (cancels ahead do not advance position) and probabilistic (cancels ahead distributed across queue).
-- Measure error of L2 queue estimation models against ground truth L3 queue position from ITCH.
-- Simulated wire-to-wire delay ($\Delta t$) kept strictly separate from measured engine processing latency.
+### Stage 3 – Queue Position and Latency (Completed & Verified)
+*All numbers directly quoted from [STAGE3_REPORT.md](STAGE3_REPORT.md) (measured on Dec 30, 2019 and Oct 30, 2019 Nasdaq TotalView-ITCH data).*
+
+- **Lock-Free SPSC Ring Buffer (`SpscRingBuffer`):**
+  - Cache-line padded read/write indices (`alignas(128)`) to eliminate false sharing across Apple Silicon and x86 cache lines.
+  - Verified under **ThreadSanitizer (TSan)** across 500,000 multi-threaded message transfers with **0 data races** and **0 dropped messages**.
+- **Naive Touch Fill Overstatement:**
+  - On natural market BBO order flow: Naive touch overstates fills by **1.11×** (Dec 30) and **1.25×** (Oct 30 FOMC session).
+  - On resting passive strategy orders (5s TTL): Naive touch overstates fills by **1.41× – 1.43×**, generating 50 false-positive fills.
+  - Mean fill timing distortion: Naive touch triggers fills **79.67 ms to 293.78 ms prematurely**, distorting execution and markout latency.
+- **Level-2 Queue Estimation Error (vs Ground Truth L3):**
+  - Both L2 Pessimistic and Probabilistic models exhibit a persistent positive queue-ahead bias (**+61.5 sh** on Dec 30, **+105.4 sh** on Oct 30) because aggregated L2 data cannot observe cancellations of orders resting ahead.
+- **Simulated Wire Latency ($\Delta t$):**
+  - Decoupled from engine execution latency (~49 ns). Wire latency transit parameter swept from 0 to 500 $\mu$s, capturing intervening queue degradation and price slippage.
+
+See [STAGE3_REPORT.md](STAGE3_REPORT.md) for complete experimental protocols, multi-day tables, and sensitivity sweeps.
 
 ### Stage 4 – Fill Simulator & Adverse Selection
 - Compare 3 fill models for a fixed passive strategy (e.g. joining the best bid when OBI is favorable):
