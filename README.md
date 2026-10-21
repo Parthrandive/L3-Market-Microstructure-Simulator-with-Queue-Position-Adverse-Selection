@@ -115,17 +115,19 @@ See [BENCHMARKS.md](BENCHMARKS.md) for full run protocols, sample distributions,
 See [STAGE3_REPORT.md](STAGE3_REPORT.md) and [STAGE4_REPORT.md](STAGE4_REPORT.md) for complete experimental protocols, multi-day tables, and sensitivity sweeps.
 
 ### Stage 4 – Fill Simulator & Adverse Selection (Completed)
-- Evaluated 3 fill models for a passive quote-posting strategy (100 shares @ Best Bid when $\text{OBI} > 0.0$, 5.0s TTL, 250 ms sampling rate) across Dec 30 (holiday lull) and Oct 30 (FOMC rate decision) sessions ($N > 63\text{k}$ orders/day):
-  1. **Model 1: Naive Touch Fill:** Fills immediately upon any trade at or through limit price.
-  2. **Model 2: Queue-Aware L3 Fill ($\Delta t = 0\,\mu\text{s}$):** Fills only when depth ahead (preceding shares in FIFO queue plus own 100 shares) is consumed by true intrusive executions.
+- Evaluated 3 fill models for a passive quote-posting strategy (100 shares @ Best Bid when $\text{OBI} > 0.0$, 5.0s TTL, 250 ms sampling rate; baseline chosen during Stage 3; full 18-combination grid reported) across Dec 30 (holiday lull) and Oct 30 (FOMC rate decision) sessions ($N > 64\text{k}$ orders/day):
+  1. **Model 1: Naive Touch Fill:** Fills immediately and in full upon any trade at or through limit price.
+  2. **Model 2: Queue-Aware L3 Fill ($\Delta t = 0\,\mu\text{s}$):** Fills only when depth ahead (preceding shares in FIFO queue plus own shares) is consumed by true intrusive executions on pure order book state.
   3. **Model 3: Latency-Aware L3 Fill ($\Delta t \in \{50\,\mu\text{s}, 100\,\mu\text{s}, 250\,\mu\text{s}, 500\,\mu\text{s}\}$):** Incorporates wire transit delay.
 - **Empirical Findings Summary (95% Time-Block Bootstrap CI across 64k+ orders/day):**
-  - **Fill Rate Overstatement:** Naive touch overstates fill rates by **1.82× [95% CI: 1.74× – 1.92×]** on Dec 30 (37.50% vs 20.57%) and **1.77× [95% CI: 1.71× – 1.85×]** on Oct 30 (37.57% vs 21.21%).
-  - **Premature Execution Lead Time:** Touch fills trigger **317.5 ms [95% CI: 293.0 – 344.3 ms]** (Dec 30) and **368.6 ms [95% CI: 333.5 – 403.3 ms]** (Oct 30) before real queue depletion.
-  - **5s Mark-to-Mid Markout PnL Overstatement:** Naive touch overstates 5s markout PnL by **3.19× [95% CI: 2.17× – 10.55×]** on Dec 30 and **2.07× [95% CI: 1.81× – 2.46×]** on Oct 30 because it fills on non-depleting trades where prices bounce.
-  - **30s Horizon Convergence:** At 30s, net markouts for both models converge near zero (+0.01 bps vs -0.05 bps on Dec 30; +0.09 bps vs +0.16 bps on Oct 30) with bootstrap confidence intervals spanning zero on both models, demonstrating no statistically significant sign inversion.
-  - **Wire Latency Null Result:** Sweeping $\Delta t \in [0, 500\,\mu\text{s}]$ changes fill rate by <0.3% and 30s markout PnL by <2%, showing wire transit delay has a negligible effect compared to queue priority itself.
-  - **Comprehensive Multiple-Testing Disclosure:** Full Cartesian grid across 18 parameter combinations (100/500 shares, 1s/5s/30s TTL, unconditional/OBI>0/OBI>0.20) disclosed in [STAGE4_REPORT.md](STAGE4_REPORT.md).
+  - **Fill Rate Overstatement:** On the 5s TTL baseline, Naive touch overstates full fill rates by **1.40× [95% CI: 1.36× – 1.45×]** on Dec 30 (46.72% vs 33.31%) and **1.43× [95% CI: 1.38× – 1.48×]** on Oct 30 (44.58% vs 31.20%).
+  - **Overstatement Range across TTLs & Sizes:** Overstatement ranges from **~1.10× at 30s TTL** to **2.25×–2.45× at 1s TTL** for 100 shares, and reaches **7.5×–8.8× at 1s TTL** (and **3.2×–3.5× at 5s TTL**) for 500 shares.
+  - **First-Fill vs. Full-Fill Dynamics:** For 500-share orders, while first-fill rate remains identical to 100-share orders (~38%–41%, since first fill occurs at the same queue depth), full-fill rate collapses to **14.76% (Dec 30) and 12.94% (Oct 30)** because exhausting 500 shares requires substantial subsequent execution volume before TTL expiration.
+  - **Premature Execution Lead Time:** Touch fills trigger **485.3 ms [95% CI: 463.9 – 508.6 ms]** (Dec 30) and **490.5 ms [95% CI: 455.3 – 525.2 ms]** (Oct 30) before real queue depletion.
+  - **Convergence at 30s:** At 30s, net markouts for both models converge (-0.26 bps vs -0.49 bps on Dec 30; -0.17 bps vs -0.34 bps on Oct 30) with bootstrap confidence intervals spanning across broader spreads, showing no statistically significant sign inversion.
+  - **Wire Latency Null Result:** Sweeping $\Delta t \in [0, 500\,\mu\text{s}]$ changes fill rate by <0.1% and markout PnL by <0.5%, showing wire transit delay has a negligible effect compared to queue priority itself.
+  - **Comprehensive Multiple-Testing Disclosure:** Full Cartesian grid across 18 parameter combinations (100/500 shares, 1s/5s/30s TTL, unconditional/OBI>0/OBI>0.20) disclosed in [STAGE4_REPORT.md](STAGE4_REPORT.md). Unconditional order counts are strictly invariant to TTL (82,173 on Dec 30; 79,686 on Oct 30); OBI order counts are strictly invariant to order size (67,432 on Dec 30; 64,102 on Oct 30).
+  - **Speedup Verification:** Both Google Benchmark (**2.21× speedup**, macro replay including decode) and custom harness (**2.60× speedup**, engine-only) are verified and reported.
 
 See [STAGE4_REPORT.md](STAGE4_REPORT.md) for full experimental tables, bootstrap distributions, cross-stage technical reconciliation, and sensitivity sweeps.
 
@@ -139,7 +141,7 @@ See [STAGE4_REPORT.md](STAGE4_REPORT.md) for full experimental tables, bootstrap
 
 - **Data:** Validated against public Nasdaq TotalView-ITCH 5.0 data (Dec 30, 2019 and Oct 30, 2019).
 - **Strict reporting:** No fabricated metrics in reports. All values reflect measured experimental output from reproducible code and fixtures.
-- **Benchmark attribution:** Google Benchmark (`l3_benchmarks`) measures macro throughput and spread across 10 randomly interleaved repetitions; custom harness (`bench_stage2`) measures batch distributions (mean, p50, p90, p99, p99.9) and tail attribution.
+- **Benchmark attribution:** Google Benchmark (`l3_benchmarks`) measures macro throughput and spread across 10 randomly interleaved repetitions (2.21× speedup); custom harness (`bench_stage2`) measures engine-only throughput (2.60× speedup) and batch distributions (mean, p50, p90, p99, p99.9).
 - **Distinction of latencies:**
   - *Simulated wire latency ($\Delta t$):* A configurable model input parameter representing transit time.
   - *Engine processing latency:* Measured execution time per message.
@@ -150,6 +152,6 @@ See [STAGE4_REPORT.md](STAGE4_REPORT.md) for full experimental tables, bootstrap
 
 ## Resume Bullet Template (Populated Post-Measurement)
 
-- Built a C++20 L3 limit order book and ITCH 5.0 replay engine (arena-allocated, intrusive FIFO levels, zero heap allocation on hot path) processing **19.43M messages/s** (Google Benchmark, 2.21× speedup over `std::map`) with **~221 ns p99** update latency on Apple M1.
-- Implemented queue-position tracking and a latency-aware fill simulator; evaluated fill overstatement on a passive quote-posting strategy, discovering a **1.77×–1.82× fill rate overstatement** in naive touch backtests, **318–369 ms premature fill bias**, and a **2.07×–3.19× overstatement** in 5s mark-to-mid markout PnL before fees.
+- Built a C++20 L3 limit order book and ITCH 5.0 replay engine (arena-allocated, intrusive FIFO levels, zero heap allocation on hot path) processing **19.43M messages/s** (Google Benchmark, 2.21× speedup over `std::map`; 2.60× engine-only) with **~221 ns p99** update latency on Apple M1.
+- Implemented queue-position tracking and a latency-aware fill simulator; evaluated fill overstatement on a passive quote-posting strategy, discovering a **1.40×–1.43× fill rate overstatement** at 5s TTL (up to **2.45× at 1s TTL**, and up to **8.8× for 500-share orders**), **485–491 ms premature fill bias**, and severe adverse selection in post-fill drift.
 - Exposed the simulator to Python via `nanobind` for algorithmic execution research.

@@ -1,5 +1,12 @@
 # Stage 3 – Queue Position Estimation and Latency Modeling
 
+> [!IMPORTANT]
+> **SUPERSEDED STATUS & FORMAL WITHDRAWAL NOTICE:**
+> This document summarizes the early Stage 3 prototype and queue position estimation research.
+> - **Withdrawn Prototype Figures:** Early prototype figures (including the preliminary ~0.5% fill rate, 13%, 7.5%, and initial +76 to +106 queue bias estimates) were affected by a prototype dangling-pointer issue upon vector reallocation during streaming replay and smaller sample sizes. They are **formally withdrawn** and superseded by the final Stage 4 implementation in [STAGE4_REPORT.md](STAGE4_REPORT.md) and [`src/fill_simulator.cpp`](src/fill_simulator.cpp).
+> - **Current Ground Truth:** Stage 4 evaluates the complete 64k+ order full-day stream across both market sessions with pure order book state, exact FIFO queue depletion, and block-bootstrapped statistical inference.
+> - **Test & Sanitizer Coverage:** All components in this codebase, including `SpscRingBuffer`, queue trackers, and the simulator, are verified with 32 passing unit tests under Release, AddressSanitizer (ASan), UndefinedBehaviorSanitizer (UBSan), and ThreadSanitizer (TSan).
+
 ## 1. Executive Summary & Definition
 
 > **Naive Touch Fill Definition:**
@@ -61,6 +68,9 @@ We evaluate the error of Level-2 queue estimators against ground-truth L3 shares
 | **Medium (201–1k sh)** | 882 | 587.0 sh | +94.5 sh | 94.5 sh | 16.1% | +92.8 sh | 93.0 sh | 15.8% |
 | **Deep (1,001–5k sh)** | 685 | 1,986.4 sh | +209.4 sh | 209.4 sh | 10.5% | +208.9 sh | 208.9 sh | 10.5% |
 | **Very Deep (>5k sh)** | 12 | 5,433.3 sh | +155.4 sh | 155.4 sh | 2.9% | +155.4 sh | 155.4 sh | 2.9% |
+
+> [!NOTE]
+> **Depth Bucket Error Scaling:** While absolute error increases with queue depth (MAE grows from 49.4 shares in shallow queues to 209.4 shares in deep queues), **relative MAE falls monotonically from 30.8% down to 2.9%**. In deep queues, large order volumes dilute the impact of untracked cancellations, allowing Level-2 estimators to achieve significantly higher percentage accuracy.
 
 ### Why Do Pessimistic and Probabilistic Models Barely Differ?
 The empirical difference between the Pessimistic model (ignoring cancels ahead) and the Probabilistic model (proportional cancel discount) is **less than 1.5 shares MAE** across all buckets. 

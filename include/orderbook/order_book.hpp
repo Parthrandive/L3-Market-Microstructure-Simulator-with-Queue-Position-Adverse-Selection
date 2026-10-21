@@ -243,6 +243,12 @@ public:
         return asks_.size();
     }
 
+    [[nodiscard]] uint32_t get_level_shares(Side side, uint32_t price) const noexcept {
+        uint32_t lvl_idx = (side == Side::Buy) ? bids_.find(price) : asks_.find(price);
+        if (lvl_idx == NULL_INDEX) return 0;
+        return level_pool_[lvl_idx].total_shares;
+    }
+
     // Sequence of order_ref in FIFO queue for a specific price level
     [[nodiscard]] std::vector<uint64_t> get_level_queue(Side side, uint32_t price) const {
         std::vector<uint64_t> queue;

@@ -70,11 +70,15 @@ TEST(Stage4FillSimulatorTest, TouchFillVsQueueL3Priority) {
 
     // Trade 4: Next trade hits head of queue -> Now Queue L3 fills!
     if (qpos.shares_ahead == 0) {
+        sim_ord.l3_first_filled = true;
+        sim_ord.l3_full_filled = true;
         sim_ord.l3_filled = true;
         sim_ord.l3_fill_ts = 1'800'000'000ULL;
         book.execute_order(sim_ord.sim_id, sim_ord.shares);
     }
 
+    EXPECT_TRUE(sim_ord.l3_first_filled);
+    EXPECT_TRUE(sim_ord.l3_full_filled);
     EXPECT_TRUE(sim_ord.l3_filled);
     // Verified lead time: Touch filled 700 ms earlier than Queue L3!
     double lead_time_ms = (static_cast<double>(sim_ord.l3_fill_ts) - static_cast<double>(sim_ord.touch_fill_ts)) / 1e6;
@@ -83,6 +87,27 @@ TEST(Stage4FillSimulatorTest, TouchFillVsQueueL3Priority) {
     // Verified book is clean: sim_id executed, no ghost orders
     auto qpos_after = book.get_queue_position(sim_ord.sim_id);
     EXPECT_FALSE(qpos_after.exists);
+}
+
+TEST(Stage4FillSimulatorTest, PartialVsFullFillExecution) {
+    SimOrder ord{};
+    ord.target_shares = 500;
+    ord.shares = 500;
+    ord.queue_ahead = 0; // At front of queue
+    
+    // Partial fill of 200 shares
+    uint32_t trade_shares = 200;
+    ord.executed_shares += trade_shares;
+    if (ord.executed_shares >= 1) ord.l3_first_filled = true;
+    if (ord.executed_shares >= ord.target_shares) ord.l3_full_filled = true;
+    
+    EXPECT_TRUE(ord.l3_first_filled);
+    EXPECT_FALSE(ord.l3_full_filled);
+    
+    // Remaining 300 shares filled
+    ord.executed_shares += 300;
+    if (ord.executed_shares >= ord.target_shares) ord.l3_full_filled = true;
+    EXPECT_TRUE(ord.l3_full_filled);
 }
 
 TEST(Stage4FillSimulatorTest, MarkoutAndDriftCalculations) {

@@ -25,18 +25,25 @@ struct SimOrder {
     uint16_t stock_locate{0};
     Side side{Side::Buy};
     uint32_t price{0};           // Limit price (Best Bid at signal time)
-    uint32_t shares{100};
+    uint32_t target_shares{100}; // Requested size (100 or 500)
+    uint32_t shares{100};        // Compatibility alias for target_shares
     uint64_t submit_ts_ns{0};     // Strategy signal timestamp
     uint64_t arrival_ts_ns{0};    // Arrival at matching engine (submit_ts + delta_t)
     uint64_t cancel_ts_ns{0};     // TTL expiration timestamp (arrival_ts + ttl)
     int time_block_id{0};         // 5-minute block id (0..77 for regular trading hours)
 
     // Initial state upon book entry
+    bool entered_book{false};
     uint32_t initial_queue_ahead{0};
+    uint64_t arrival_ref_watermark{0};
     double initial_spread_bps{0.0};
     double entry_mid{0.0};
 
-    // 1. Model 1: Naive Touch Model
+    // Tracking state in matching engine
+    uint32_t queue_ahead{0};
+    uint32_t executed_shares{0};
+
+    // 1. Model 1: Naive Touch Model (assumes 100% execution upon first trade at or through limit price)
     bool touch_filled{false};
     uint64_t touch_fill_ts{0};
     double touch_fill_mid{0.0};
@@ -48,11 +55,18 @@ struct SimOrder {
     bool touch_m30_done{false};
 
     // 2. Model 2 / Model 3: Queue-Aware L3 Model (with wire latency delta_t)
-    bool entered_book{false};
-    bool l3_filled{false};
-    bool l3_canceled{false};
+    bool l3_first_filled{false};  // Partial or full execution (executed_shares >= 1)
+    uint64_t l3_first_fill_ts{0};
+    double l3_first_fill_mid{0.0};
+
+    bool l3_full_filled{false};   // Complete execution (executed_shares >= target_shares)
+    bool l3_filled{false};        // Compatibility alias for l3_full_filled
     uint64_t l3_fill_ts{0};
     double l3_fill_mid{0.0};
+
+    bool l3_canceled{false};      // Expired at TTL with remaining unfilled shares
+
+    // Markouts for L3 fill (measured from first fill timestamp)
     double l3_markout_1s_bps{0.0};
     double l3_markout_5s_bps{0.0};
     double l3_markout_30s_bps{0.0};
@@ -87,9 +101,13 @@ struct FillModelSummary {
     std::string model_name;
     uint64_t delta_t_ns{0};
     size_t total_orders{0};
-    size_t total_fills{0};
+    size_t total_first_fills{0};
+    size_t total_full_fills{0};
+    size_t total_fills{0}; // primary reported fills (full-fill for L3, touch for Touch)
 
-    BootstrapCI fill_rate_ci{};
+    BootstrapCI first_fill_rate_ci{};
+    BootstrapCI full_fill_rate_ci{};
+    BootstrapCI fill_rate_ci{}; // primary fill rate CI
     BootstrapCI overstatement_ratio_ci{};
     BootstrapCI mean_lead_time_ms_ci{};
 
@@ -112,7 +130,7 @@ struct FillModelSummary {
 struct SimulationConfig {
     uint64_t delta_t_ns{0};                  // Wire transit latency
     uint64_t ttl_ns{5'000'000'000ULL};       // TTL in nanoseconds (default 5.0s)
-    double obi_threshold{0.0};               // Order Book Imbalance filter
+    double obi_threshold{0.0};               // Order Book Imbalance filter (-1.0 for unconditional)
     uint64_t sampling_interval_ns{250'000'000ULL}; // 250 ms sampling rate
     uint32_t order_shares{100};              // Order size in shares (100 or 500)
 };
@@ -137,7 +155,8 @@ public:
         std::vector<SimOrder> completed_orders;
         completed_orders.reserve(100000);
         std::deque<SimOrder> in_flight_orders;
-        std::vector<size_t> resting_sim_indices;
+        std::vector<size_t> active_resting_indices;
+        active_resting_indices.reserve(1024);
 
         std::priority_queue<PendingMarkout, std::vector<PendingMarkout>, std::greater<PendingMarkout>> pending_markouts;
 
@@ -145,6 +164,7 @@ public:
         std::vector<uint8_t> buffer(BUF_SIZE);
         size_t leftover = 0;
         uint64_t current_ts_ns = 0;
+        uint64_t max_ref_seen = 0;
         uint64_t next_sim_id = 900'000'000'000ULL;
         uint64_t last_order_submit_ts = 0;
 
@@ -167,9 +187,43 @@ public:
             return (l_it != last_valid_mid.end()) ? l_it->second : 0.0;
         };
 
+        auto drain_arrivals = [&]() {
+            while (!in_flight_orders.empty() && in_flight_orders.front().arrival_ts_ns <= current_ts_ns) {
+                SimOrder ord = in_flight_orders.front();
+                in_flight_orders.pop_front();
+
+                auto b_it = books.find(ord.stock_locate);
+                if (b_it != books.end()) {
+                    ord.entered_book = true;
+                    // Initial queue ahead is pure real market volume resting at limit price
+                    ord.initial_queue_ahead = b_it->second.get_level_shares(ord.side, ord.price);
+                    ord.queue_ahead = ord.initial_queue_ahead;
+                    ord.arrival_ref_watermark = max_ref_seen;
+
+                    auto bb = b_it->second.best_bid();
+                    auto ba = b_it->second.best_ask();
+                    if (bb && ba && ba->first > bb->first) {
+                        ord.entry_mid = (static_cast<double>(bb->first) + static_cast<double>(ba->first)) / 2.0;
+                        ord.initial_spread_bps = ((static_cast<double>(ba->first) - static_cast<double>(bb->first)) / ord.entry_mid) * 10'000.0;
+                    }
+
+                    size_t ord_idx = completed_orders.size();
+                    completed_orders.push_back(ord);
+                    active_resting_indices.push_back(ord_idx);
+                }
+            }
+        };
+
         auto process_event = [&](char msg_type, uint16_t locate, uint64_t ts,
                                  uint64_t ref, uint32_t shares, uint32_t price, Side side, uint64_t new_ref) {
             current_ts_ns = ts;
+
+            // Update watermark of highest Nasdaq ITCH order_ref seen so far
+            if (msg_type == 'A' || msg_type == 'F' || msg_type == 'E' || msg_type == 'C' || msg_type == 'X' || msg_type == 'D') {
+                max_ref_seen = std::max(max_ref_seen, ref);
+            } else if (msg_type == 'U') {
+                max_ref_seen = std::max(max_ref_seen, std::max(ref, new_ref));
+            }
 
             // 1. Process pending markouts in chronological order
             while (!pending_markouts.empty() && pending_markouts.top().target_ts_ns <= current_ts_ns) {
@@ -207,118 +261,137 @@ public:
             }
 
             // 2. In-flight order arrival after simulated wire transit latency
-            while (!in_flight_orders.empty() && in_flight_orders.front().arrival_ts_ns <= current_ts_ns) {
-                SimOrder ord = in_flight_orders.front();
-                in_flight_orders.pop_front();
-
-                auto book_it = books.find(ord.stock_locate);
-                if (book_it != books.end()) {
-                    auto bbo = book_it->second.best_bid();
-                    auto ask = book_it->second.best_ask();
-                    ord.entered_book = true;
-                    uint32_t depth_ahead = 0;
-                    if (bbo && bbo->first == ord.price) {
-                        depth_ahead = bbo->second;
-                    }
-                    ord.initial_queue_ahead = depth_ahead;
-                    if (bbo && ask && ask->first > bbo->first) {
-                        ord.entry_mid = (static_cast<double>(bbo->first) + static_cast<double>(ask->first)) / 2.0;
-                        ord.initial_spread_bps = ((static_cast<double>(ask->first) - static_cast<double>(bbo->first)) / ord.entry_mid) * 10'000.0;
-                    }
-
-                    // Add order to L3 engine at the tail of the level
-                    book_it->second.add_order(ord.sim_id, ord.side, ord.shares, ord.price);
-
-                    size_t ord_idx = completed_orders.size();
-                    completed_orders.push_back(ord);
-                    resting_sim_indices.push_back(ord_idx);
-                }
-            }
+            drain_arrivals();
 
             // 3. Check resting TTL expiration
-            for (auto it = resting_sim_indices.begin(); it != resting_sim_indices.end();) {
+            for (auto it = active_resting_indices.begin(); it != active_resting_indices.end();) {
                 SimOrder& ord = completed_orders[*it];
-                if (!ord.l3_filled && !ord.l3_canceled && current_ts_ns >= ord.cancel_ts_ns) {
-                    auto b_it = books.find(ord.stock_locate);
-                    if (b_it != books.end()) {
-                        b_it->second.cancel_order(ord.sim_id, ord.shares);
+                if (current_ts_ns >= ord.cancel_ts_ns) {
+                    if (!ord.l3_full_filled) {
+                        ord.l3_canceled = true;
                     }
-                    ord.l3_canceled = true;
-                    it = resting_sim_indices.erase(it);
-                } else if (ord.l3_filled || ord.l3_canceled) {
-                    it = resting_sim_indices.erase(it);
+                    it = active_resting_indices.erase(it);
+                } else if (ord.touch_filled && ord.l3_full_filled) {
+                    it = active_resting_indices.erase(it);
                 } else {
                     ++it;
                 }
             }
 
-            // 4. Process market event
+            // 4. Process market event on pure OrderBook
             auto book_it = books.find(locate);
             if (book_it != books.end()) {
                 OrderBook& book = book_it->second;
 
-                bool is_target_level = false;
-                if (msg_type == 'E' || msg_type == 'C' || msg_type == 'X' || msg_type == 'D') {
-                    auto pos = book.get_queue_position(ref);
-                    if (pos.exists) {
-                        price = pos.price;
-                        side = pos.side;
-                        is_target_level = true;
-                    }
+                OrderBook::QueuePosition pos{};
+                if (msg_type == 'E' || msg_type == 'C' || msg_type == 'X' || msg_type == 'D' || msg_type == 'U') {
+                    pos = book.get_queue_position(ref);
                 }
 
-                // If execution: check simulated orders
-                if ((msg_type == 'E' || msg_type == 'C') && is_target_level) {
+                // If execution: check trades against resting simulated Buy orders
+                if ((msg_type == 'E' || msg_type == 'C') && pos.exists && pos.side == Side::Buy) {
                     double fill_mid = get_current_mid(locate);
 
-                    for (size_t ord_idx : resting_sim_indices) {
+                    for (size_t ord_idx : active_resting_indices) {
                         SimOrder& ord = completed_orders[ord_idx];
-                        if (ord.stock_locate == locate && ord.price == price && ord.side == side) {
-                            // Model 1: Naive Touch Fill trigger (first trade touches limit price)
-                            if (!ord.touch_filled && current_ts_ns <= ord.cancel_ts_ns) {
-                                ord.touch_filled = true;
-                                ord.touch_fill_ts = current_ts_ns;
-                                ord.touch_fill_mid = fill_mid;
-                                pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 1'000'000'000ULL, 1, true, fill_mid});
-                                pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 5'000'000'000ULL, 5, true, fill_mid});
-                                pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 30'000'000'000ULL, 30, true, fill_mid});
-                            }
+                        if (ord.stock_locate == locate && current_ts_ns <= ord.cancel_ts_ns) {
+                            // Case A: Trade through our limit price (pos.price < ord.price)
+                            if (pos.price < ord.price) {
+                                if (!ord.touch_filled) {
+                                    ord.touch_filled = true;
+                                    ord.touch_fill_ts = current_ts_ns;
+                                    ord.touch_fill_mid = fill_mid;
+                                    pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 1'000'000'000ULL, 1, true, fill_mid});
+                                    pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 5'000'000'000ULL, 5, true, fill_mid});
+                                    pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 30'000'000'000ULL, 30, true, fill_mid});
+                                }
+                                if (!ord.l3_full_filled) {
+                                    ord.queue_ahead = 0;
+                                    uint32_t needed = ord.target_shares - ord.executed_shares;
+                                    uint32_t fill_qty = std::min(shares, needed);
+                                    ord.executed_shares += fill_qty;
 
-                            // Model 2 / Model 3: Queue-Aware L3 priority fill trigger
-                            if (!ord.l3_filled && current_ts_ns <= ord.cancel_ts_ns) {
-                                auto qpos_before = book.get_queue_position(ord.sim_id);
-                                if (qpos_before.exists) {
-                                    bool ahead = book.is_order_ahead(ref, ord.sim_id);
-                                    bool execute_sim = false;
-
-                                    if (qpos_before.shares_ahead == 0) {
-                                        execute_sim = true;
-                                    } else if (!ahead && ref != ord.sim_id) {
-                                        // A subsequent order was executed, so our priority was cleared
-                                        execute_sim = true;
-                                    } else if (ahead && shares > qpos_before.shares_ahead) {
-                                        execute_sim = true;
-                                    }
-
-                                    if (execute_sim) {
-                                        ord.l3_filled = true;
-                                        ord.l3_fill_ts = current_ts_ns;
-                                        ord.l3_fill_mid = fill_mid;
-
+                                    if (!ord.l3_first_filled && ord.executed_shares >= 1) {
+                                        ord.l3_first_filled = true;
+                                        ord.l3_first_fill_ts = current_ts_ns;
+                                        ord.l3_first_fill_mid = fill_mid;
                                         pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 1'000'000'000ULL, 1, false, fill_mid});
                                         pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 5'000'000'000ULL, 5, false, fill_mid});
                                         pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 30'000'000'000ULL, 30, false, fill_mid});
+                                    }
+                                    if (ord.executed_shares >= ord.target_shares) {
+                                        ord.l3_full_filled = true;
+                                        ord.l3_filled = true;
+                                        ord.l3_fill_ts = current_ts_ns;
+                                        ord.l3_fill_mid = fill_mid;
+                                    }
+                                }
+                            }
+                            // Case B: Trade at our limit price (pos.price == ord.price)
+                            else if (pos.price == ord.price) {
+                                if (!ord.touch_filled) {
+                                    ord.touch_filled = true;
+                                    ord.touch_fill_ts = current_ts_ns;
+                                    ord.touch_fill_mid = fill_mid;
+                                    pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 1'000'000'000ULL, 1, true, fill_mid});
+                                    pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 5'000'000'000ULL, 5, true, fill_mid});
+                                    pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 30'000'000'000ULL, 30, true, fill_mid});
+                                }
+                                if (!ord.l3_full_filled) {
+                                    uint32_t excess = 0;
+                                    if (ref <= ord.arrival_ref_watermark) {
+                                        // Real order was ahead of us in FIFO queue
+                                        if (shares <= ord.queue_ahead) {
+                                            ord.queue_ahead -= shares;
+                                        } else {
+                                            excess = shares - ord.queue_ahead;
+                                            ord.queue_ahead = 0;
+                                        }
+                                    } else {
+                                        // Real order behind us was executed; implies all volume ahead was exhausted
+                                        ord.queue_ahead = 0;
+                                        excess = shares;
+                                    }
 
-                                        // Cleanly remove from matching engine to prevent ghost shares
-                                        book.execute_order(ord.sim_id, ord.shares);
+                                    if (excess > 0) {
+                                        uint32_t needed = ord.target_shares - ord.executed_shares;
+                                        uint32_t fill_qty = std::min(excess, needed);
+                                        ord.executed_shares += fill_qty;
+
+                                        if (!ord.l3_first_filled && ord.executed_shares >= 1) {
+                                            ord.l3_first_filled = true;
+                                            ord.l3_first_fill_ts = current_ts_ns;
+                                            ord.l3_first_fill_mid = fill_mid;
+                                            pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 1'000'000'000ULL, 1, false, fill_mid});
+                                            pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 5'000'000'000ULL, 5, false, fill_mid});
+                                            pending_markouts.push({ord_idx, locate, ord.price, current_ts_ns + 30'000'000'000ULL, 30, false, fill_mid});
+                                        }
+                                        if (ord.executed_shares >= ord.target_shares) {
+                                            ord.l3_full_filled = true;
+                                            ord.l3_filled = true;
+                                            ord.l3_fill_ts = current_ts_ns;
+                                            ord.l3_fill_mid = fill_mid;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
+                // If cancel, delete, or replace: adjust queue ahead for orders placed before ours
+                else if ((msg_type == 'X' || msg_type == 'D' || msg_type == 'U') && pos.exists && pos.side == Side::Buy) {
+                    uint32_t canceled = (msg_type == 'X') ? shares : pos.order_shares;
+                    for (size_t ord_idx : active_resting_indices) {
+                        SimOrder& ord = completed_orders[ord_idx];
+                        if (ord.stock_locate == locate && ord.price == pos.price && current_ts_ns <= ord.cancel_ts_ns) {
+                            if (ref <= ord.arrival_ref_watermark) {
+                                ord.queue_ahead = (ord.queue_ahead > canceled) ? (ord.queue_ahead - canceled) : 0;
+                            }
+                        }
+                    }
+                }
 
-                // Apply mutation to book
+                // Apply mutation to pure OrderBook
                 switch (msg_type) {
                     case 'A':
                     case 'F':
@@ -348,7 +421,7 @@ public:
                     last_valid_mid[locate] = (static_cast<double>(bb->first) + static_cast<double>(ba->first)) / 2.0;
                 }
 
-                // Submit simulated orders during regular hours
+                // Submit simulated orders during regular hours strictly based on pure book state
                 if (current_ts_ns >= MARKET_OPEN_NS && current_ts_ns < MARKET_CLOSE_NS) {
                     if (current_ts_ns - last_order_submit_ts >= config_.sampling_interval_ns) {
                         if (bb.has_value() && ba.has_value() && ba->first > bb->first) {
@@ -362,7 +435,7 @@ public:
                                 new_ord.stock_locate = locate;
                                 new_ord.side = Side::Buy;
                                 new_ord.price = bb->first;
-                                new_ord.shares = config_.order_shares;
+                                new_ord.target_shares = config_.order_shares;
                                 new_ord.submit_ts_ns = current_ts_ns;
                                 new_ord.arrival_ts_ns = current_ts_ns + config_.delta_t_ns;
                                 new_ord.cancel_ts_ns = new_ord.arrival_ts_ns + config_.ttl_ns;
@@ -370,6 +443,9 @@ public:
 
                                 in_flight_orders.push_back(new_ord);
                                 last_order_submit_ts = current_ts_ns;
+
+                                // Drain immediate arrivals (e.g. delta_t == 0)
+                                drain_arrivals();
                             }
                         }
                     }
@@ -490,7 +566,7 @@ inline FillModelSummary evaluate_model_performance(
     bool is_touch_model,
     const std::string& model_name,
     uint64_t delta_t_ns,
-    size_t reference_l3_fills = 0)
+    size_t reference_l3_full_fills = 0)
 {
     FillModelSummary summary{};
     summary.model_name = model_name;
@@ -503,7 +579,14 @@ inline FillModelSummary evaluate_model_performance(
     size_t valid_fills = 0;
 
     for (const auto& ord : orders) {
-        bool filled = is_touch_model ? ord.touch_filled : ord.l3_filled;
+        bool f_first = is_touch_model ? ord.touch_filled : ord.l3_first_filled;
+        bool f_full = is_touch_model ? ord.touch_filled : ord.l3_full_filled;
+
+        if (f_first) summary.total_first_fills++;
+        if (f_full) summary.total_full_fills++;
+
+        // Headline fill evaluation (full fill for L3, touch for Touch model)
+        bool filled = f_full;
         if (filled) {
             summary.total_fills++;
             double fill_mid = is_touch_model ? ord.touch_fill_mid : ord.l3_fill_mid;
@@ -520,8 +603,8 @@ inline FillModelSummary evaluate_model_performance(
             sum_m5 += m5;
             sum_m30 += m30;
 
-            // Mark-to-mid markout PnL in USD:
-            double scale = static_cast<double>(ord.shares) / 100.0;
+            // Mark-to-mid markout PnL in USD
+            double scale = static_cast<double>(ord.target_shares) / 100.0;
             double pnl_5s = ((m5 * static_cast<double>(ord.price)) / 1'000'000.0) * scale;
             double pnl_30s = ((m30 * static_cast<double>(ord.price)) / 1'000'000.0) * scale;
             sum_pnl_5s += pnl_5s;
@@ -540,8 +623,9 @@ inline FillModelSummary evaluate_model_performance(
         summary.mid_drift_30s_bps = point_m30 - summary.avg_half_spread_captured_bps;
     }
 
-    double point_fill_rate = summary.total_orders > 0 ? (100.0 * summary.total_fills / summary.total_orders) : 0.0;
-    double point_overstate = reference_l3_fills > 0 ? (static_cast<double>(summary.total_fills) / reference_l3_fills) : 1.0;
+    double point_first_rate = summary.total_orders > 0 ? (100.0 * summary.total_first_fills / summary.total_orders) : 0.0;
+    double point_full_rate = summary.total_orders > 0 ? (100.0 * summary.total_full_fills / summary.total_orders) : 0.0;
+    double point_overstate = reference_l3_full_fills > 0 ? (static_cast<double>(summary.total_full_fills) / reference_l3_full_fills) : 1.0;
 
     // 5-minute time-block bootstrapping (78 blocks)
     constexpr int NUM_BLOCKS = 78;
@@ -557,7 +641,8 @@ inline FillModelSummary evaluate_model_performance(
     std::mt19937_64 rng(42 + delta_t_ns + (is_touch_model ? 1000 : 0));
     std::uniform_int_distribution<int> block_dist(0, NUM_BLOCKS - 1);
 
-    std::vector<double> bs_fill_rates;
+    std::vector<double> bs_first_fill_rates;
+    std::vector<double> bs_full_fill_rates;
     std::vector<double> bs_overstate;
     std::vector<double> bs_lead_time;
     std::vector<double> bs_m1, bs_m5, bs_m30;
@@ -565,7 +650,8 @@ inline FillModelSummary evaluate_model_performance(
     std::vector<double> bs_pnl_30s;
     std::vector<double> bs_pnl_ratios;
 
-    bs_fill_rates.reserve(BOOTSTRAP_ITERS);
+    bs_first_fill_rates.reserve(BOOTSTRAP_ITERS);
+    bs_full_fill_rates.reserve(BOOTSTRAP_ITERS);
     bs_overstate.reserve(BOOTSTRAP_ITERS);
     bs_lead_time.reserve(BOOTSTRAP_ITERS);
     bs_m1.reserve(BOOTSTRAP_ITERS);
@@ -577,8 +663,9 @@ inline FillModelSummary evaluate_model_performance(
 
     for (int iter = 0; iter < BOOTSTRAP_ITERS; ++iter) {
         size_t b_tot = 0;
-        size_t b_fills = 0;
-        size_t b_ref_fills = 0;
+        size_t b_first_fills = 0;
+        size_t b_full_fills = 0;
+        size_t b_ref_full_fills = 0;
         double b_sum_lead = 0.0;
         size_t b_lead_count = 0;
         double b_sum_m1 = 0.0, b_sum_m5 = 0.0, b_sum_m30 = 0.0;
@@ -590,10 +677,13 @@ inline FillModelSummary evaluate_model_performance(
             for (size_t idx : block_order_indices[sampled_bid]) {
                 const auto& ord = orders[idx];
                 b_tot++;
-                double scale = static_cast<double>(ord.shares) / 100.0;
-                bool f = is_touch_model ? ord.touch_filled : ord.l3_filled;
-                if (f) {
-                    b_fills++;
+                double scale = static_cast<double>(ord.target_shares) / 100.0;
+                bool f_first = is_touch_model ? ord.touch_filled : ord.l3_first_filled;
+                bool f_full = is_touch_model ? ord.touch_filled : ord.l3_full_filled;
+
+                if (f_first) b_first_fills++;
+                if (f_full) {
+                    b_full_fills++;
                     double m1 = is_touch_model ? ord.touch_markout_1s_bps : ord.l3_markout_1s_bps;
                     double m5 = is_touch_model ? ord.touch_markout_5s_bps : ord.l3_markout_5s_bps;
                     double m30 = is_touch_model ? ord.touch_markout_30s_bps : ord.l3_markout_30s_bps;
@@ -603,11 +693,11 @@ inline FillModelSummary evaluate_model_performance(
                     b_sum_pnl5 += ((m5 * static_cast<double>(ord.price)) / 1'000'000.0) * scale;
                     b_sum_pnl30 += ((m30 * static_cast<double>(ord.price)) / 1'000'000.0) * scale;
                 }
-                if (ord.l3_filled) {
-                    b_ref_fills++;
+                if (ord.l3_full_filled) {
+                    b_ref_full_fills++;
                     b_l3_pnl5 += ((ord.l3_markout_5s_bps * static_cast<double>(ord.price)) / 1'000'000.0) * scale;
                 }
-                if (ord.touch_filled && ord.l3_filled) {
+                if (ord.touch_filled && ord.l3_full_filled) {
                     double lead_ms = (static_cast<double>(ord.l3_fill_ts) - static_cast<double>(ord.touch_fill_ts)) / 1e6;
                     b_sum_lead += lead_ms;
                     b_lead_count++;
@@ -616,17 +706,18 @@ inline FillModelSummary evaluate_model_performance(
         }
 
         if (b_tot > 0) {
-            bs_fill_rates.push_back(100.0 * b_fills / b_tot);
-            if (b_ref_fills > 0 && is_touch_model) {
-                bs_overstate.push_back(static_cast<double>(b_fills) / b_ref_fills);
+            bs_first_fill_rates.push_back(100.0 * b_first_fills / b_tot);
+            bs_full_fill_rates.push_back(100.0 * b_full_fills / b_tot);
+            if (b_ref_full_fills > 0 && is_touch_model) {
+                bs_overstate.push_back(static_cast<double>(b_full_fills) / b_ref_full_fills);
             }
             if (b_lead_count > 0 && is_touch_model) {
                 bs_lead_time.push_back(b_sum_lead / b_lead_count);
             }
-            if (b_fills > 0) {
-                bs_m1.push_back(b_sum_m1 / b_fills);
-                bs_m5.push_back(b_sum_m5 / b_fills);
-                bs_m30.push_back(b_sum_m30 / b_fills);
+            if (b_full_fills > 0) {
+                bs_m1.push_back(b_sum_m1 / b_full_fills);
+                bs_m5.push_back(b_sum_m5 / b_full_fills);
+                bs_m30.push_back(b_sum_m30 / b_full_fills);
                 bs_pnl_5s.push_back(b_sum_pnl5);
                 bs_pnl_30s.push_back(b_sum_pnl30);
             }
@@ -644,14 +735,16 @@ inline FillModelSummary evaluate_model_performance(
     size_t lead_n = 0;
     double lead_sum = 0.0;
     for (const auto& ord : orders) {
-        if (ord.touch_filled && ord.l3_filled) {
+        if (ord.touch_filled && ord.l3_full_filled) {
             lead_n++;
             lead_sum += (static_cast<double>(ord.l3_fill_ts) - static_cast<double>(ord.touch_fill_ts)) / 1e6;
         }
     }
     if (lead_n > 0) point_lead = lead_sum / lead_n;
 
-    summary.fill_rate_ci = compute_bootstrap_ci(bs_fill_rates, point_fill_rate);
+    summary.first_fill_rate_ci = compute_bootstrap_ci(bs_first_fill_rates, point_first_rate);
+    summary.full_fill_rate_ci = compute_bootstrap_ci(bs_full_fill_rates, point_full_rate);
+    summary.fill_rate_ci = summary.full_fill_rate_ci;
     summary.overstatement_ratio_ci = compute_bootstrap_ci(bs_overstate, point_overstate);
     summary.mean_lead_time_ms_ci = compute_bootstrap_ci(bs_lead_time, point_lead);
     summary.markout_1s_ci = compute_bootstrap_ci(bs_m1, point_m1);
